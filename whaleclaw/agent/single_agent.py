@@ -131,6 +131,24 @@ from whaleclaw.agent.helpers.skill_lock import (
     skill_trigger_mentioned as _skill_trigger_mentioned,
 )
 from whaleclaw.agent.helpers.skill_lock import update_guard_state as _update_guard_state
+from whaleclaw.agent.helpers.skill_lock import (
+    build_skill_queue_advance_message as _build_skill_queue_advance_message,
+)
+from whaleclaw.agent.helpers.skill_lock import (
+    build_skill_queue_plan_messages as _build_skill_queue_plan_messages,
+)
+from whaleclaw.agent.helpers.skill_lock import (
+    build_skill_queue_status_message as _build_skill_queue_status_message,
+)
+from whaleclaw.agent.helpers.skill_lock import (
+    is_queue_advance_confirmation as _is_queue_advance_confirmation,
+)
+from whaleclaw.agent.helpers.skill_lock import (
+    parse_skill_queue_plan as _parse_skill_queue_plan,
+)
+from whaleclaw.agent.helpers.skill_lock import (
+    skill_queue_has_next as _skill_queue_has_next,
+)
 from whaleclaw.agent.helpers.tool_execution import (
     can_auto_create_parent_for_failure,
     create_default_registry,
@@ -173,7 +191,12 @@ from whaleclaw.sessions.store import SessionStore
 from whaleclaw.skills.parser import Skill
 from whaleclaw.tools.base import ToolResult
 from whaleclaw.tools.registry import ToolRegistry
-from whaleclaw.types import StreamCallback
+from whaleclaw.types import (
+    ProviderAuthError,
+    ProviderError,
+    ProviderRateLimitError,
+    StreamCallback,
+)
 from whaleclaw.utils.log import get_logger
 
 if TYPE_CHECKING:
@@ -259,6 +282,17 @@ _NANO_BANANA_TEXT_TO_IMAGE_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
     re.compile(r"(?:这是一张|一张).+(?:的图|图片|海报|插画)", re.IGNORECASE),
 )
+_NON_SKILL_STEP_RE = re.compile(
+    r"(?:做|做个|做一个|创建|新建|生成|制作|写)"
+    r"(?:一个|个|一份|份)?"
+    r"(?:.{0,8})"
+    r"(?:PPT|ppt|pptx|PPTX|幻灯片|Word|word|docx|DOCX|文档|Excel|excel|xlsx|XLSX|表格)"
+    r"|(?:插入|放入|放到|加入|加到|添加到|嵌入|写入)"
+    r"(?:.{0,6})"
+    r"(?:PPT|ppt|pptx|Word|word|docx|文档|表格)",
+    re.IGNORECASE,
+)
+
 _NANO_BANANA_NON_EXECUTION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"^\s*(?:你好|嗨|hi|hello|在吗|早上好|中午好|晚上好)\s*[!！,.。]*\s*$",
@@ -326,10 +360,6 @@ _TASK_DONE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*结束了?\s*$"),
     re.compile(r"^\s*可以了?\s*$"),
     re.compile(r"^\s*ok\s*$", re.IGNORECASE),
-)
-_TASK_DONE_INTENT_RE = re.compile(
-    r"(?:任务.{0,4}(?:完成|结束)|(?:完成|结束).{0,4}任务|收尾|结束本轮|这轮结束|本轮结束)",
-    re.IGNORECASE,
 )
 _SKILL_LOCK_STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?:现在|当前).{0,8}(?:被)?锁定在.{0,8}(?:哪个|什么).{0,6}(?:技能|skill)"),
@@ -490,6 +520,40 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
     if len(text) <= char_cap:
         return text
     return text[:char_cap]
+
+
+def _dedup_consecutive_errors(
+    conversation: list[Message],
+    tool_name: str,
+    current_error: str,
+) -> None:
+    """回溯 conversation，把与当前错误相似的连续历史 tool 错误替换为精简摘要。
+
+    相似度判定：取错误文本前 120 字符比较（忽略时间戳/路径等细节差异）。
+    只替换 *之前* 的消息内容，当前这条不受影响（它还没 append）。
+    """
+    if not conversation or not current_error:
+        return
+    sig = current_error[:120]
+    replaced = 0
+    for msg in reversed(conversation):
+        content = msg.content or ""
+        if msg.role == "tool" or (msg.role == "user" and content.startswith("[工具 ")):
+            if "[ERROR]" not in content and "[重复错误" not in content:
+                break
+            prev_sig = content[:120] if msg.role == "tool" else content[content.find("\n") + 1:][:120]
+            if prev_sig == sig:
+                short = f"[重复错误，与下一条相同，已省略] 工具: {tool_name}"
+                msg.content = short
+                replaced += 1
+            else:
+                break
+        elif msg.role == "assistant":
+            continue
+        else:
+            break
+    if replaced:
+        log.debug("agent.dedup_errors", tool=tool_name, replaced=replaced)
 
 
 async def _compress_external_memory_with_llm(
@@ -1258,7 +1322,10 @@ def _is_numbered_image_reference_edit_message(text: str) -> bool:
 
 
 def _lockable_skill_ids(skills: list[Skill]) -> list[str]:
-    return _normalize_skill_ids([skill for skill in skills if skill.lock_session])
+    return _normalize_skill_ids([
+        skill for skill in skills
+        if skill.lock_session and skill.is_user_installed
+    ])
 
 
 def _looks_like_nano_banana_prompt_text(message: str) -> bool:
@@ -1416,6 +1483,10 @@ def _resolve_nano_banana_input_paths(
     explicit_paths = _extract_input_image_paths_from_text(llm_message)
     if explicit_paths:
         return explicit_paths
+    # 用户明确要求文生图时，直接返回空（text 模式），
+    # 不让后面的 edit 误判覆盖意图。
+    if any(p.search(llm_message) for p in _NANO_BANANA_TEXT_TO_IMAGE_PATTERNS):
+        return []
     numbered_paths = _resolve_numbered_input_image_paths(session, llm_message)
     if numbered_paths:
         return numbered_paths
@@ -2298,11 +2369,26 @@ async def run_agent(
     lock_is_explicit = False
     pending_lock_skill_ids: list[str] = []
     lock_waiting_done = False
+    skill_lock_resumed_from_waiting = False
     skill_announce_pending = False
+    skill_queue: list[dict[str, str]] = []
+    skill_queue_index: int = 0
+    has_skill_queue = False
+    nano_banana_recommended_command: str = ""
     routed_skills: list[Skill] = []
     routed_skill_ids: list[str] = []
     if not multi_agent_internal:
         if session is not None:
+            raw_queue = session.metadata.get("skill_queue")
+            if isinstance(raw_queue, list) and raw_queue:
+                skill_queue = [
+                    {str(k): str(v) for k, v in item.items() if isinstance(k, str)}
+                    for item in raw_queue
+                    if isinstance(item, dict)
+                ]
+                raw_idx = session.metadata.get("skill_queue_index")
+                skill_queue_index = int(raw_idx) if isinstance(raw_idx, int) else 0
+                has_skill_queue = bool(skill_queue)
             raw_locked = session.metadata.get("locked_skill_ids")
             if isinstance(raw_locked, list):
                 locked_skill_ids = [
@@ -2323,8 +2409,6 @@ async def run_agent(
             raw_waiting = session.metadata.get("skill_lock_waiting_done")
             lock_waiting_done = bool(raw_waiting)
             skill_announce_pending = bool(session.metadata.get("skill_lock_announce_pending"))
-            raw_pending_switch_ids = session.metadata.get("pending_skill_switch_ids")
-            raw_pending_switch_message = session.metadata.get("pending_skill_switch_message")
         if _is_skill_lock_status_question(message):
             status_session = session
             if session is not None and session_manager is not None:
@@ -2334,35 +2418,9 @@ async def run_agent(
                     status_session = refreshed_session
             return _build_skill_lock_status_reply(status_session)
         previous_locked_skill_ids = list(locked_skill_ids)
-        pending_switch_skill_ids: list[str] = []
-        pending_switch_message = ""
         if session is not None:
-            if isinstance(raw_pending_switch_ids, list):
-                pending_switch_skill_ids = [
-                    str(x).strip().lower()
-                    for x in raw_pending_switch_ids
-                    if isinstance(x, str) and str(x).strip()
-                ]
-            if isinstance(raw_pending_switch_message, str):
-                pending_switch_message = raw_pending_switch_message.strip()
-
-        if pending_switch_skill_ids and pending_switch_message:
-            if _is_task_done_confirmation(
-                message,
-                task_done_patterns=_TASK_DONE_PATTERNS,
-            ):
-                if session is not None:
-                    session.metadata.pop("pending_skill_switch_ids", None)
-                    session.metadata.pop("pending_skill_switch_message", None)
-                    metadata_dirty = True
-            elif message.strip():
-                requested_skills = "、".join(pending_switch_skill_ids)
-                current_skills = "、".join(locked_skill_ids)
-                return (
-                    f"当前会话仍锁定在 {current_skills} 技能。"
-                    f"如果你确实要切换到 {requested_skills}，请先回复“任务完成”，"
-                    "之后再重新输入目标命令。"
-                )
+            session.metadata.pop("pending_skill_switch_ids", None)
+            session.metadata.pop("pending_skill_switch_message", None)
 
         if (
             lock_is_explicit
@@ -2401,7 +2459,12 @@ async def run_agent(
                     session.metadata.pop("pending_skill_switch_ids", None)
                     session.metadata.pop("pending_skill_switch_message", None)
                     session.metadata.pop("skill_param_state", None)
+                    session.metadata.pop("skill_queue", None)
+                    session.metadata.pop("skill_queue_index", None)
+                    session.metadata.pop("skill_queue_original_message", None)
                     metadata_dirty = True
+                skill_queue = []
+                has_skill_queue = False
                 if remainder:
                     llm_message = remainder
             else:
@@ -2423,7 +2486,13 @@ async def run_agent(
                         session.metadata.pop("locked_skill_ids", None)
                         session.metadata.pop("skill_lock_waiting_done", None)
                         session.metadata.pop("skill_lock_announce_pending", None)
+                        session.metadata.pop("skill_queue", None)
+                        session.metadata.pop("skill_queue_index", None)
+                        session.metadata.pop("skill_queue_original_message", None)
                     metadata_dirty = True
+                if not lockable_use_skill_ids:
+                    skill_queue = []
+                    has_skill_queue = False
                 llm_message = remainder or f"使用技能 {', '.join(use_skill_ids)} 处理当前请求。"
         elif lock_is_explicit and locked_skill_ids and _is_task_done_confirmation(
             message,
@@ -2432,6 +2501,8 @@ async def run_agent(
             locked_skill_ids = []
             lock_is_explicit = False
             lock_waiting_done = False
+            has_skill_queue = False
+            skill_queue = []
             if session is not None:
                 session.metadata.pop("locked_skill_ids", None)
                 session.metadata.pop("skill_lock_waiting_done", None)
@@ -2439,20 +2510,72 @@ async def run_agent(
                 session.metadata.pop("pending_skill_switch_ids", None)
                 session.metadata.pop("pending_skill_switch_message", None)
                 session.metadata.pop("skill_param_state", None)
+                session.metadata.pop("skill_queue", None)
+                session.metadata.pop("skill_queue_index", None)
+                session.metadata.pop("skill_queue_original_message", None)
                 if session_manager is not None:
                     await session_manager.update_metadata(session, session.metadata)
             return "已确认任务完成，已解除本轮技能锁定。"
         elif (
-            lock_waiting_done
-            and message.strip()
-            and _TASK_DONE_INTENT_RE.search(message.strip())
+            has_skill_queue
+            and lock_waiting_done
+            and _is_queue_advance_confirmation(message)
         ):
-            return (
-                "我理解你是在结束当前任务，但这次还没有完成正式解锁。"
-                "请直接回复“任务完成”或“任务结束”，我会立即解除技能锁定。"
-            )
+            # 队列推进：用户确认"继续"，推进到下一个技能
+            next_idx = skill_queue_index + 1
+            if next_idx < len(skill_queue):
+                if skill_queue_index < len(skill_queue):
+                    skill_queue[skill_queue_index]["status"] = "done"
+                skill_queue[next_idx]["status"] = "active"
+                skill_queue_index = next_idx
+                next_skill_id = skill_queue[next_idx]["skill_id"]
+                locked_skill_ids = [next_skill_id]
+                lock_is_explicit = True
+                lock_waiting_done = False
+                skill_announce_pending = False
+                if session is not None:
+                    session.metadata["skill_queue"] = skill_queue
+                    session.metadata["skill_queue_index"] = skill_queue_index
+                    session.metadata["locked_skill_ids"] = locked_skill_ids
+                    session.metadata["skill_lock_waiting_done"] = False
+                    session.metadata.pop("skill_param_state", None)
+                    metadata_dirty = True
+                next_task = skill_queue[next_idx].get("task", "")
+                original_msg = ""
+                if session is not None:
+                    original_msg = str(
+                        session.metadata.get("skill_queue_original_message", "")
+                    )
+                llm_message = (
+                    f"继续执行第 {next_idx + 1} 步: {next_task}"
+                    + (f"\n原始任务: {original_msg}" if original_msg else "")
+                )
+                log.info(
+                    "agent.skill_queue_advanced",
+                    session_id=session_id,
+                    new_index=next_idx,
+                    skill_id=next_skill_id,
+                )
+            else:
+                # 已是最后一步，走正常解锁
+                locked_skill_ids = []
+                lock_is_explicit = False
+                lock_waiting_done = False
+                has_skill_queue = False
+                if session is not None:
+                    session.metadata.pop("skill_queue", None)
+                    session.metadata.pop("skill_queue_index", None)
+                    session.metadata.pop("skill_queue_original_message", None)
+                    session.metadata.pop("locked_skill_ids", None)
+                    session.metadata.pop("skill_lock_waiting_done", None)
+                    session.metadata.pop("skill_lock_announce_pending", None)
+                    session.metadata.pop("skill_param_state", None)
+                    if session_manager is not None:
+                        await session_manager.update_metadata(session, session.metadata)
+                return "全部子任务已完成，已解除技能锁定。"
         elif lock_waiting_done:
             lock_waiting_done = False
+            skill_lock_resumed_from_waiting = True
             if session is not None:
                 session.metadata["skill_lock_waiting_done"] = False
                 metadata_dirty = True
@@ -2461,9 +2584,19 @@ async def run_agent(
         routed_skill_ids = _normalize_skill_ids(routed_skills)
         lockable_routed_skill_ids = _lockable_skill_ids(routed_skills)
 
+        _is_compound_with_other_steps = (
+            routed_skill_ids
+            and any(_skill_trigger_mentioned(skill, message) for skill in routed_skills)
+            and not _looks_like_skill_activation_message(
+                message, skill_activation_patterns=_SKILL_ACTIVATION_PATTERNS,
+            )
+            and _NON_SKILL_STEP_RE.search(message) is not None
+        )
+
         if (
             not locked_skill_ids
             and routed_skill_ids
+            and not _is_compound_with_other_steps
             and (
                 _looks_like_skill_activation_message(
                     message,
@@ -2472,15 +2605,70 @@ async def run_agent(
                 or any(_skill_trigger_mentioned(skill, message) for skill in routed_skills)
             )
         ):
-            locked_skill_ids = lockable_routed_skill_ids
-            lock_is_explicit = bool(lockable_routed_skill_ids)
-            lock_waiting_done = False
-            skill_announce_pending = bool(lockable_routed_skill_ids)
-            if session is not None and lockable_routed_skill_ids:
-                session.metadata["locked_skill_ids"] = locked_skill_ids
-                session.metadata["skill_lock_waiting_done"] = False
-                session.metadata["skill_lock_announce_pending"] = True
-                metadata_dirty = True
+            if len(lockable_routed_skill_ids) >= 2 and session is not None:
+                # 多 lockable 技能 → 调 LLM 做任务拆解，建立串行队列
+                plan_messages = _build_skill_queue_plan_messages(
+                    lockable_routed_skill_ids, llm_message,
+                )
+                try:
+                    plan_resp = await router.chat(
+                        model_id, plan_messages, tools=None, on_stream=None,
+                    )
+                    parsed_queue = _parse_skill_queue_plan(
+                        plan_resp.content or "", lockable_routed_skill_ids,
+                    )
+                except Exception:
+                    parsed_queue = []
+                if len(parsed_queue) >= 2:
+                    parsed_queue[0]["status"] = "active"
+                    skill_queue = parsed_queue
+                    skill_queue_index = 0
+                    has_skill_queue = True
+                    first_skill_id = parsed_queue[0]["skill_id"]
+                    locked_skill_ids = [first_skill_id]
+                    lock_is_explicit = True
+                    lock_waiting_done = False
+                    skill_announce_pending = False
+                    session.metadata["skill_queue"] = skill_queue
+                    session.metadata["skill_queue_index"] = 0
+                    session.metadata["skill_queue_original_message"] = llm_message
+                    session.metadata["locked_skill_ids"] = locked_skill_ids
+                    session.metadata["skill_lock_waiting_done"] = False
+                    session.metadata["skill_lock_announce_pending"] = False
+                    metadata_dirty = True
+                    status_text = _build_skill_queue_status_message(
+                        skill_queue, skill_queue_index,
+                    )
+                    if session_manager is not None:
+                        await _persist_message(
+                            session_manager, session, "assistant", status_text,
+                        )
+                    log.info(
+                        "agent.skill_queue_created",
+                        session_id=session_id,
+                        queue_len=len(skill_queue),
+                        skill_ids=[item["skill_id"] for item in skill_queue],
+                    )
+                else:
+                    # LLM 拆解失败，回退到现有并列锁定
+                    locked_skill_ids = lockable_routed_skill_ids
+                    lock_is_explicit = bool(lockable_routed_skill_ids)
+                    lock_waiting_done = False
+                    skill_announce_pending = bool(lockable_routed_skill_ids)
+                    session.metadata["locked_skill_ids"] = locked_skill_ids
+                    session.metadata["skill_lock_waiting_done"] = False
+                    session.metadata["skill_lock_announce_pending"] = True
+                    metadata_dirty = True
+            else:
+                locked_skill_ids = lockable_routed_skill_ids
+                lock_is_explicit = bool(lockable_routed_skill_ids)
+                lock_waiting_done = False
+                skill_announce_pending = bool(lockable_routed_skill_ids)
+                if session is not None and lockable_routed_skill_ids:
+                    session.metadata["locked_skill_ids"] = locked_skill_ids
+                    session.metadata["skill_lock_waiting_done"] = False
+                    session.metadata["skill_lock_announce_pending"] = True
+                    metadata_dirty = True
         elif not locked_skill_ids and lockable_routed_skill_ids:
             pending_lock_skill_ids = lockable_routed_skill_ids
 
@@ -2501,7 +2689,8 @@ async def run_agent(
                 routed_skills = []
                 lockable_routed_skill_ids = []
             else:
-                switch_requested = any(
+                # 只有明确提及了用户安装技能名称时才拦截，否则静默丢弃
+                explicit_switch = any(
                     (
                         _skill_explicitly_mentioned(skill, message)
                         or _skill_trigger_mentioned(skill, message)
@@ -2509,22 +2698,18 @@ async def run_agent(
                     )
                     for skill in routed_skills
                     if skill.id.strip().lower() not in set(locked_skill_ids)
+                    and skill.is_user_installed
                 )
-                if not switch_requested:
-                    routed_skill_ids = []
-                    routed_skills = []
-                else:
-                    requested_skills = "、".join(routed_skill_ids)
-                    current_skills = "、".join(locked_skill_ids)
-                    if session is not None:
-                        session.metadata["pending_skill_switch_ids"] = routed_skill_ids
-                        session.metadata["pending_skill_switch_message"] = llm_message
-                        metadata_dirty = True
+                if explicit_switch:
+                    requested_names = "、".join(routed_skill_ids)
+                    current_names = "、".join(locked_skill_ids)
                     return (
-                        f"当前会话仍锁定在 {current_skills} 技能。"
-                        f"如果你确实要切换到 {requested_skills}，请先回复“任务完成”，"
+                        f"当前会话仍锁定在 {current_names} 技能。"
+                        f"如果你确实要切换到 {requested_names}，请先回复“任务完成”，"
                         "之后再重新输入目标命令。"
                     )
+                routed_skill_ids = []
+                routed_skills = []
 
         active_skills_for_images = routed_skills
         if lock_is_explicit and locked_skill_ids:
@@ -2596,6 +2781,23 @@ async def run_agent(
             and not nano_banana_execution_request
         )
 
+        if (
+            _is_compound_with_other_steps
+            and lock_is_explicit
+            and locked_skill_ids
+            and session is not None
+        ):
+            pending_lock_skill_ids = list(locked_skill_ids)
+            locked_skill_ids = []
+            lock_is_explicit = False
+            lock_waiting_done = False
+            skill_announce_pending = False
+            session.metadata.pop("locked_skill_ids", None)
+            session.metadata.pop("skill_lock_waiting_done", None)
+            session.metadata.pop("skill_lock_announce_pending", None)
+            session.metadata.pop("skill_param_state", None)
+            metadata_dirty = True
+
         if lock_is_explicit and locked_skill_ids and not lock_waiting_done and session is not None:
             forced_skill_ids = locked_skill_ids
             if skip_nano_banana_guard:
@@ -2643,11 +2845,23 @@ async def run_agent(
                             if cleaned_prompt:
                                 updated["prompt"] = cleaned_prompt
                         else:
+                            # 用户明确说"文生图"时，视为全新请求，
+                            # 不当作 edit/regenerate 来合并旧 prompt。
+                            _is_explicit_t2i = any(
+                                p.search(llm_message)
+                                for p in _NANO_BANANA_TEXT_TO_IMAGE_PATTERNS
+                            )
                             merged_prompt = _merge_nano_banana_prompt(
                                 previous_prompt=previous_prompt,
                                 message=llm_message,
-                                regenerate=_message_requests_image_regenerate(llm_message),
-                                image_edit=_message_requests_image_edit(llm_message),
+                                regenerate=(
+                                    _message_requests_image_regenerate(llm_message)
+                                    and not _is_explicit_t2i
+                                ),
+                                image_edit=(
+                                    _message_requests_image_edit(llm_message)
+                                    and not _is_explicit_t2i
+                                ),
                             )
                             if merged_prompt:
                                 updated["prompt"] = merged_prompt
@@ -2729,79 +2943,14 @@ async def run_agent(
                     session.metadata["last_nano_banana_model_display"] = model_display
                     if isinstance(nano_state, dict):
                         nano_state["__last_mode__"] = mode
-                    command = _build_nano_banana_command(
+                    nano_banana_recommended_command = _build_nano_banana_command(
                         mode=mode,
                         model_display=model_display,
                         prompt=prompt,
                         input_paths=input_paths,
                         ratio=ratio,
                     )
-                    tc = ToolCall(
-                        id="nano_banana_fixed_runner",
-                        name="bash",
-                        arguments={"command": command, "timeout": 330},
-                    )
-                    if session_manager is not None:
-                        await _persist_message(
-                            session_manager,
-                            session,
-                            "assistant",
-                            "(调用工具: bash)",
-                        )
-                    tc_id, result = await _execute_tool(
-                        registry,
-                        tc,
-                        evomap_enabled=False,
-                        browser_allowed=True,
-                        office_block_bash_probe=False,
-                        office_block_message="",
-                        office_edit_only=False,
-                        office_edit_path="",
-                        on_tool_call=on_tool_call,
-                        on_tool_result=on_tool_result,
-                    )
-                    tool_output = _format_tool_output(result)
-                    if session_manager is not None and not _is_transient_cli_usage_error(result):
-                        snippet = tool_output[:500] if len(tool_output) > 500 else tool_output
-                        await _persist_message(
-                            session_manager,
-                            session,
-                            "tool",
-                            f"[bash] {snippet}",
-                            tool_call_id=tc_id,
-                            tool_name="bash",
-                        )
-                    if result.success:
-                        image_path = _parse_nano_banana_result_path(result.output or "")
-                        if image_path and Path(image_path).expanduser().is_file():
-                            session.metadata["last_generated_image_path"] = image_path
-                            _append_image_reference_history(session.metadata, [image_path])
-                        session.metadata["locked_skill_ids"] = locked_skill_ids
-                        session.metadata["skill_lock_waiting_done"] = True
-                        if session_manager is not None:
-                            await session_manager._store.update_session_field(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                                session.id,
-                                metadata=session.metadata,
-                            )
-                        final_text = _format_nano_banana_success_reply(
-                            model_display=model_display,
-                            image_path=image_path,
-                            regenerate=_message_requests_image_regenerate(llm_message),
-                        )
-                        final_text = (
-                            f"{final_text}\n\n如果本轮任务已完成，请回复“任务完成”以解除技能锁定；"
-                            "若需继续修改，请直接继续说需求。"
-                        )
-                        if session_manager is not None:
-                            await _persist_message(session_manager, session, "assistant", final_text)
-                        return final_text
-                    fail_text = (
-                        "nano-banana 执行失败。\n"
-                        f"{tool_output}"
-                    )
-                    if session_manager is not None:
-                        await _persist_message(session_manager, session, "assistant", fail_text)
-                    return fail_text
+                    metadata_dirty = True
 
     if session is not None:
         pending_raw = session.metadata.get("evomap_pending_choices")
@@ -2940,6 +3089,10 @@ async def run_agent(
             }
         elif evo_first_mode:
             selected_tool_names.add("evomap_fetch")
+        if nano_banana_recommended_command:
+            for _nb_tool in ("bash", "reminder", "cron"):
+                if _nb_tool in available_tool_names:
+                    selected_tool_names.add(_nb_tool)
         tool_schemas = registry.to_llm_schemas(include_names=selected_tool_names)
         dropped_names = sorted(available_tool_names - selected_tool_names)
         log.info(
@@ -2969,6 +3122,16 @@ async def run_agent(
     )
     if lock_is_explicit and locked_skill_ids:
         system_messages.append(_build_skill_lock_system_message(locked_skill_ids))
+        if skill_lock_resumed_from_waiting:
+            joined_ids = ", ".join(locked_skill_ids)
+            system_messages.append(Message(
+                role="system",
+                content=(
+                    f"用户刚刚发送了新的任务请求，当前仍锁定在 {joined_ids} 技能。\n"
+                    "请立即按照技能规则执行用户的新请求，直接调用工具完成任务。\n"
+                    "禁止输出使用说明、操作指南或功能介绍，直接动手做。"
+                ),
+            ))
         if "nano-banana-image-t8" in locked_skill_ids:
             current_model = _resolve_nano_banana_model_display(session)
             system_messages.append(
@@ -2977,8 +3140,48 @@ async def run_agent(
                     _recover_recent_session_image_paths(session),
                 )
             )
+    if nano_banana_recommended_command:
+        system_messages.append(Message(
+            role="system",
+            content=(
+                "nano-banana 生图参数已齐，以下是命令模板（timeout 设为 330）：\n"
+                f"```\n{nano_banana_recommended_command}\n```\n"
+                "使用规则：\n"
+                "1. 如果用户只是要求生图，直接调用 bash 执行上述命令。\n"
+                "2. 如果用户的请求是复合任务（如先写文档再生图），"
+                "请按正确顺序编排：先完成其他步骤，在需要生图时再调用 bash 执行。\n"
+                "3. 你可以根据用户意图调整 --prompt 参数内容"
+                "（只放与生图相关的描述，去掉写文档等无关部分）。\n"
+                "4. 如果用户要多张图，可以多次调用 bash，"
+                "每次修改 --prompt 以生成不同内容。\n"
+                "5. 不可修改的参数：--mode、--model、--edit-model、脚本路径。\n"
+                "6. 如果用户要求延迟执行（如 N分钟后生图），"
+                "请调用 reminder 工具，设置 action='agent'，"
+                "message 填写完整的生图指令（如 用香蕉生图画一只波斯猫），"
+                "这样到时间后会自动触发 agent 执行该任务。\n"
+                "7. 禁止输出命令本身给用户看，直接调用 bash 工具执行。"
+            ),
+        ))
     _append_office_system_hints(system_messages, session, llm_message)
-    image_api_probe_guard_enabled = _is_image_generation_request(llm_message)
+
+    if (
+        pending_lock_skill_ids
+        and _NON_SKILL_STEP_RE.search(llm_message) is not None
+    ):
+        system_messages.append(Message(
+            role="system",
+            content=(
+                "这是一个复合任务，用户消息中包含多个步骤。\n"
+                "请按用户描述的顺序逐步执行，每一步都调用工具完成。\n"
+                "用户消息中已包含全部所需信息，不要向用户追问参数。\n"
+                "技能文档中关于追问缺失参数的指引在此场景下不适用。"
+            ),
+        ))
+
+    image_api_probe_guard_enabled = (
+        _is_image_generation_request(llm_message)
+        and _NON_SKILL_STEP_RE.search(llm_message) is None
+    )
     if image_api_probe_guard_enabled:
         system_messages.append(_build_image_generation_system_message())
     if evo_first_mode:
@@ -3163,8 +3366,12 @@ async def run_agent(
         if is_office_request and _has_any_last_office_path(session.metadata):
             office_block_bash_probe = True
             office_block_message = _build_office_path_block_message(session.metadata)
+            _msg_lower = llm_message.lower()
+            _msg_mentions_ppt = any(
+                kw in _msg_lower for kw in ("ppt", "pptx", "幻灯片")
+            )
             last_pptx = session.metadata.get("last_pptx_path")
-            if isinstance(last_pptx, str) and last_pptx.strip():
+            if isinstance(last_pptx, str) and last_pptx.strip() and _msg_mentions_ppt:
                 office_edit_only = True
                 office_edit_path = last_pptx.strip()
     max_tool_rounds = max(1, int(agent_cfg.max_tool_rounds))
@@ -3193,12 +3400,35 @@ async def run_agent(
             )
 
         _llm_t0 = _time.monotonic()
-        response: AgentResponse = await router.chat(
-            model_id,
-            all_messages,
-            tools=tool_schemas or None,
-            on_stream=on_stream,
-        )
+        _llm_retries = 0
+        _llm_last_err: Exception | None = None
+        while _llm_retries <= 2:
+            try:
+                response = await router.chat(
+                    model_id,
+                    all_messages,
+                    tools=tool_schemas or None,
+                    on_stream=on_stream,
+                )
+                _llm_last_err = None
+                break
+            except ProviderAuthError:
+                raise
+            except ProviderRateLimitError:
+                raise
+            except ProviderError as exc:
+                _llm_last_err = exc
+                _llm_retries += 1
+                if _llm_retries > 2:
+                    raise
+                log.warning(
+                    "agent.llm_retry",
+                    attempt=_llm_retries,
+                    error=str(exc)[:200],
+                    model=model_id,
+                    session_id=session_id,
+                )
+                await asyncio.sleep(1.5 * _llm_retries)
         _llm_ms = int((_time.monotonic() - _llm_t0) * 1000)
         round_input = response.input_tokens
         round_output = response.output_tokens
@@ -3563,6 +3793,21 @@ async def run_agent(
             ):
                 metadata_dirty = True
 
+            if (
+                session is not None
+                and tc.name == "bash"
+                and result.success
+                and "nano-banana-image-t8" in locked_skill_ids
+            ):
+                _nb_output = result.output or ""
+                _nb_image_path = _parse_nano_banana_result_path(_nb_output)
+                if _nb_image_path and Path(_nb_image_path).expanduser().is_file():
+                    session.metadata["last_generated_image_path"] = _nb_image_path
+                    _append_image_reference_history(
+                        session.metadata, [_nb_image_path]
+                    )
+                    metadata_dirty = True
+
             if session is not None and tc.name in {"ppt_edit", "docx_edit", "xlsx_edit"}:
                 arg_path = tc.arguments.get("path")
                 if (
@@ -3573,6 +3818,9 @@ async def run_agent(
                     metadata_dirty = True
 
             tool_output = _format_tool_output(result)
+
+            if not result.success:
+                _dedup_consecutive_errors(conversation, tc.name, tool_output)
 
             if native_tools:
                 tool_msg = Message(
@@ -3676,7 +3924,16 @@ async def run_agent(
         session.metadata["locked_skill_ids"] = locked_skill_ids
         session.metadata["skill_lock_waiting_done"] = True
         metadata_dirty = True
-        final_text = f"{final_text}\n\n{_lock_confirm_tip}" if final_text else _lock_confirm_tip
+        if has_skill_queue and _skill_queue_has_next(skill_queue, skill_queue_index):
+            if skill_queue_index < len(skill_queue):
+                skill_queue[skill_queue_index]["status"] = "done"
+                session.metadata["skill_queue"] = skill_queue
+            _q_advance_tip = _build_skill_queue_advance_message(
+                skill_queue, skill_queue_index,
+            )
+            final_text = f"{final_text}\n\n{_q_advance_tip}" if final_text else _q_advance_tip
+        else:
+            final_text = f"{final_text}\n\n{_lock_confirm_tip}" if final_text else _lock_confirm_tip
 
     if metadata_dirty and session is not None and session_manager is not None:
         await session_manager.update_metadata(session, session.metadata)

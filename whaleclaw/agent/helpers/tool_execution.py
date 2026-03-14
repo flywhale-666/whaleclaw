@@ -93,9 +93,11 @@ def create_default_registry(
         registry.register(ReminderTool(cron_scheduler))
 
     from whaleclaw.skills.manager import SkillManager
+    from whaleclaw.tools.mcp_manage import McpManageTool
     from whaleclaw.tools.skill_tool import SkillManageTool
 
     registry.register(SkillManageTool(SkillManager()))
+    registry.register(McpManageTool())
 
     if memory_manager is not None:
         from whaleclaw.tools.memory_tool import MemoryAddTool, MemorySearchTool
@@ -337,14 +339,78 @@ async def _maybe_retry_python_script_invocation(
         return result
 
 
+_ERROR_SUMMARY_MAX_CHARS = 300
+
+_TRACEBACK_RE = re.compile(r"Traceback \(most recent call last\):")
+_FINAL_ERROR_RE = re.compile(
+    r"^(\w+(?:\.\w+)*(?:Error|Exception|Warning|Fault|Interrupt|Exit).*)",
+    re.MULTILINE,
+)
+_USER_FRAME_RE = re.compile(
+    r'^\s+File "(/tmp/[^"]+)", line (\d+)',
+    re.MULTILINE,
+)
+_NON_TB_TAIL_LINES = 3
+
+
+def _summarize_error(text: str) -> str:
+    """从错误输出中提取摘要：错误类型 + 用户脚本位置 + 非堆栈关键行。"""
+    lines = text.splitlines()
+    if len(lines) <= 5:
+        return text
+
+    parts: list[str] = []
+
+    # 提取 traceback 之前的内容（如 "生图失败: HTTP 422" / API 响应）
+    tb_match = _TRACEBACK_RE.search(text)
+    if tb_match:
+        pre_tb = text[:tb_match.start()].strip()
+        if pre_tb:
+            pre_lines = pre_tb.splitlines()
+            for ln in pre_lines[:3]:
+                ln = ln.strip()
+                if ln and ln != "[stderr]":
+                    parts.append(ln)
+
+    # 提取最终错误行（如 "ModuleNotFoundError: No module named pptx"）
+    final_errors: list[str] = []
+    for m in _FINAL_ERROR_RE.finditer(text):
+        final_errors.append(m.group(1).strip())
+    if final_errors:
+        parts.append(final_errors[-1])
+
+    # 提取用户脚本触发位置（/tmp/ 下的文件，非 site-packages）
+    user_frame = _USER_FRAME_RE.search(text)
+    if user_frame:
+        parts.append(f"触发位置: {user_frame.group(1)} 第{user_frame.group(2)}行")
+
+    # 无 traceback 的长输出：取首尾各几行
+    if not tb_match and not final_errors:
+        head = lines[:2]
+        tail = lines[-_NON_TB_TAIL_LINES:]
+        omitted = len(lines) - len(head) - len(tail)
+        if omitted > 0:
+            return "\n".join(head + [f"  ... (省略 {omitted} 行) ..."] + tail)
+        return text
+
+    if not parts:
+        return text if len(text) <= _ERROR_SUMMARY_MAX_CHARS else text[:_ERROR_SUMMARY_MAX_CHARS]
+    return "\n".join(parts)
+
+
 def format_tool_output(result: ToolResult) -> str:
     if result.success:
         return result.output or "(empty output)"
-    output = f"[ERROR] {result.error or 'unknown error'}\n{result.output}".strip()
+    error_part = result.error or "unknown error"
+    output_part = result.output or ""
+    raw = f"[ERROR] {error_part}\n{output_part}".strip()
+    raw = _summarize_error(raw)
+    if len(raw) > _ERROR_SUMMARY_MAX_CHARS:
+        raw = raw[:_ERROR_SUMMARY_MAX_CHARS] + " ..."
     diagnosis = diagnose_failure_hint(result)
     if diagnosis:
-        output += f"\n[DIAGNOSIS] {diagnosis}"
-    return output
+        raw += f"\n[DIAGNOSIS] {diagnosis}"
+    return raw
 
 
 def is_transient_cli_usage_error(result: ToolResult) -> bool:

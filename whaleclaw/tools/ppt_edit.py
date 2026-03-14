@@ -76,7 +76,8 @@ class PptEditTool(Tool):
         return ToolDefinition(
             name="ppt_edit",
             description=(
-                "修改现有 PPT（.pptx）：支持文本替换、标题更新、商务风格、背景色、备注、"
+                "修改现有 PPT（.pptx）：支持新增页面（add_slide）、文本替换、标题更新、"
+                "商务风格、背景色、备注、"
                 "插图（add_image 新增图片；replace_image 替换已有图片，保持原位置尺寸；"
                 "remove_image 删除图片）。换图/替换封面图请用 replace_image。"
             ),
@@ -87,11 +88,12 @@ class PptEditTool(Tool):
                     name="action",
                     type="string",
                     description=(
-                        "操作类型：replace_text|set_title|set_notes|set_background"
+                        "操作类型：add_slide|replace_text|set_title|set_notes|set_background"
                         "|add_image|replace_image|remove_image|apply_business_style"
                     ),
                     required=False,
                     enum=[
+                        "add_slide",
                         "replace_text",
                         "set_title",
                         "set_notes",
@@ -201,6 +203,44 @@ class PptEditTool(Tool):
             prs = Presentation(str(path))
         except Exception as exc:
             return ToolResult(success=False, output="", error=f"PPT 打开失败: {exc}")
+
+        if action == "add_slide":
+            layout_idx = 5  # "Title Only" 版式：有标题区、无内容占位，适合插图
+            if layout_idx >= len(prs.slide_layouts):
+                layout_idx = len(prs.slide_layouts) - 1
+            layout = prs.slide_layouts[layout_idx]
+            new_slide = prs.slides.add_slide(layout)
+            new_page_no = len(prs.slides)
+            title_text = str(kwargs.get("new_text", "")).strip()
+            if title_text:
+                from pptx.util import Inches, Pt
+                from pptx.dml.color import RGBColor
+                from pptx.enum.text import PP_ALIGN
+
+                title_shape = new_slide.shapes.title
+                if title_shape is None:
+                    title_shape = new_slide.shapes.add_textbox(
+                        Inches(0.8), Inches(0.35), Inches(11.0), Inches(1.0),
+                    )
+                tf = title_shape.text_frame
+                tf.clear()
+                p = tf.paragraphs[0]
+                p.text = title_text
+                p.alignment = PP_ALIGN.LEFT
+                for run in p.runs:
+                    run.font.bold = True
+                    run.font.size = Pt(34)
+                    run.font.name = "Microsoft YaHei"
+                    run.font.color.rgb = RGBColor(15, 39, 71)
+            try:
+                prs.save(str(path))
+            except Exception as exc:
+                return ToolResult(success=False, output="", error=f"PPT 保存失败: {exc}")
+            suffix = f"，标题: {title_text}" if title_text else ""
+            return ToolResult(
+                success=True,
+                output=f"已在 {path} 末尾新增第 {new_page_no} 页{suffix}",
+            )
 
         if slide_index > len(prs.slides):
             return ToolResult(

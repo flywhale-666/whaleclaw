@@ -1,4 +1,9 @@
-"""Tool guard helpers for the single-agent runtime."""
+"""Tool guard helpers for the single-agent runtime.
+
+两套独立熔断机制并行运行：
+- 搜图专用熔断：只管 search_images，不参与通用签名
+- 通用模糊熔断：管所有其他工具，双层签名（精确 + 模糊）取较大值
+"""
 
 from __future__ import annotations
 
@@ -15,6 +20,19 @@ from whaleclaw.agent.helpers.image_search import (
 )
 from whaleclaw.providers.base import ToolCall
 from whaleclaw.tools.base import ToolResult
+
+_MCPORTER_CALL_RE = re.compile(
+    r"^(mcporter\s+call\s+\S+\s+\S+)",
+)
+_BASH_NOISE_RE = re.compile(
+    r"""(?x)
+    \s+--output\s+\S+
+    | \s+2>\s*(?:/dev/null|\$null|&1)
+    | \s+\d+>\s*(?:/dev/null|\$null)
+    | \s+--?\w+=\S+
+    | \s+--\w+(?:\s+(?!-)\S+)?
+    """,
+)
 
 
 @dataclass(slots=True)
@@ -35,7 +53,8 @@ class ToolGuardUpdate:
 
 @dataclass(slots=True)
 class ToolGuardState:
-    recent_signatures: list[str] = field(default_factory=list)
+    recent_exact_signatures: list[str] = field(default_factory=list)
+    recent_fuzzy_signatures: list[str] = field(default_factory=list)
     loop_detect_window: int = 3
     loop_warning_signature: str = ""
     loop_block_signature: str = ""
@@ -51,6 +70,10 @@ class ToolGuardState:
     last_failed_bash_signature: str = ""
     blocked_tools: set[str] = field(default_factory=set)
     low_value_bash_probe_streak: int = 0
+    # 兼容旧字段名（测试 / 外部引用）
+    @property
+    def recent_signatures(self) -> list[str]:
+        return self.recent_exact_signatures
 
 
 def is_low_value_bash_probe(tc: ToolCall) -> bool:
@@ -80,6 +103,38 @@ def is_low_value_bash_probe(tc: ToolCall) -> bool:
 def normalize_bash_command_signature(command: str) -> str:
     """Normalize bash command text for repeated-failure detection."""
     return re.sub(r"\s+", " ", command.strip())
+
+
+def _fuzzy_signature_for_tool(tc: ToolCall) -> str:
+    """生成工具调用的模糊签名，忽略参数值的差异。
+
+    规则：
+    - bash (mcporter call): 只保留 命令 + 服务名 + 工具名
+    - bash (普通命令): 去掉 key=value、--flag、重定向等噪音
+    - browser: action + url/text（不同目标 = 不同签名）
+    - search_images: 不参与通用熔断，返回空
+    - 其他工具: 工具名 + 参数键名（忽略参数值）
+    """
+    if tc.name == "browser":
+        action = str(tc.arguments.get("action", "")).strip().lower()
+        if action == "search_images":
+            return ""
+        target = str(
+            tc.arguments.get("url", "") or tc.arguments.get("text", "")
+        ).strip()
+        return f"browser:{action}:{target}"
+
+    if tc.name == "bash":
+        raw = str(tc.arguments.get("command", "")).strip()
+        m = _MCPORTER_CALL_RE.match(raw)
+        if m:
+            return f"bash:{re.sub(r'\\s+', ' ', m.group(1))}"
+        skeleton = _BASH_NOISE_RE.sub("", raw)
+        skeleton = re.sub(r"\s+", " ", skeleton).strip()
+        return f"bash:{skeleton}"
+
+    keys = sorted(tc.arguments.keys())
+    return f"{tc.name}:{','.join(keys)}"
 
 
 def tail_repeat_count(items: list[str]) -> int:
@@ -118,7 +173,8 @@ def update_planned_image_count(
     if detected_count is None:
         return
     state.planned_image_count = detected_count
-    state.search_images_limit = max((detected_count * 3 + 1) // 2, detected_count + 1)
+    # max(计划配图数 × 1.5 + 1, 计划配图数 + 1)
+    state.search_images_limit = max(int(detected_count * 1.5 + 1), detected_count + 1)
 
 
 def blocked_tool_reasons(
@@ -310,20 +366,45 @@ def apply_post_round_guards(
             "禁止继续调用 search_images。请立即进入生成或编辑步骤。"
         )
 
-    sig_parts: list[str] = []
-    for tc in tool_calls:
+    # ── 双层签名：精确 + 模糊（搜图不参与通用签名） ──
+    non_search_calls = [tc for tc in tool_calls if not is_search_images_call(tc)]
+    if not non_search_calls:
+        return update
+
+    exact_parts: list[str] = []
+    fuzzy_parts: list[str] = []
+    for tc in non_search_calls:
         arg_str = json.dumps(tc.arguments, sort_keys=True, ensure_ascii=False)[:200]
-        sig_parts.append(f"{tc.name}:{arg_str}")
-    round_sig = hashlib.md5("|".join(sig_parts).encode()).hexdigest()  # noqa: S324
-    state.recent_signatures.append(round_sig)
-    exact_repeat_count = tail_repeat_count(state.recent_signatures)
-    repeated_tools = sorted({tc.name for tc in tool_calls})
+        exact_parts.append(f"{tc.name}:{arg_str}")
+        fsig = _fuzzy_signature_for_tool(tc)
+        if fsig:
+            fuzzy_parts.append(fsig)
+
+    exact_sig = hashlib.md5("|".join(exact_parts).encode()).hexdigest()  # noqa: S324
+    fuzzy_sig = hashlib.md5("|".join(fuzzy_parts).encode()).hexdigest() if fuzzy_parts else exact_sig  # noqa: S324
+
+    state.recent_exact_signatures.append(exact_sig)
+    state.recent_fuzzy_signatures.append(fuzzy_sig)
+    exact_repeat = tail_repeat_count(state.recent_exact_signatures)
+    fuzzy_repeat = tail_repeat_count(state.recent_fuzzy_signatures)
+    repeat_count = max(exact_repeat, fuzzy_repeat)
+
+    repeated_tools = sorted({tc.name for tc in non_search_calls})
     repeated_tools_text = "、".join(repeated_tools) or "当前工具"
+
+    # 合并签名用于去重（避免同一轮多次触发）
+    combined_sig = f"{exact_sig}:{fuzzy_sig}"
+
+    # ── 三级递进：3 轮警告 → 4 轮熔断 → 5 轮中止 ──
+    warn_threshold = state.loop_detect_window          # 3
+    block_threshold = state.loop_detect_window + 1     # 4
+    abort_threshold = state.loop_detect_window + 2     # 5
+
     if (
-        exact_repeat_count >= state.loop_detect_window
-        and round_sig != state.loop_warning_signature
+        repeat_count >= warn_threshold
+        and combined_sig != state.loop_warning_signature
     ):
-        state.loop_warning_signature = round_sig
+        state.loop_warning_signature = combined_sig
         update.log_events.append(
             GuardLogEvent(
                 level="warning",
@@ -332,20 +413,21 @@ def apply_post_round_guards(
                     "session_id": session_id or "",
                     "rounds": round_idx + 1,
                     "repeated_tools": repeated_tools,
-                    "exact_repeat_count": exact_repeat_count,
+                    "exact_repeat": exact_repeat,
+                    "fuzzy_repeat": fuzzy_repeat,
                 },
             )
         )
         update.conversation_messages.append(
             "[系统提示] 检测到你在重复执行相似操作且未取得进展。"
             f"重复工具：{repeated_tools_text}。"
-            "请立刻换一种方式解决问题，不要继续沿用同一套路。"
+            "请跳过前置检查，直接执行核心操作。"
         )
     if (
-        exact_repeat_count >= (state.loop_detect_window + 1)
-        and round_sig != state.loop_block_signature
+        repeat_count >= block_threshold
+        and combined_sig != state.loop_block_signature
     ):
-        state.loop_block_signature = round_sig
+        state.loop_block_signature = combined_sig
         newly_blocked = [name for name in repeated_tools if name not in state.blocked_tools]
         if newly_blocked:
             state.blocked_tools.update(newly_blocked)
@@ -357,7 +439,8 @@ def apply_post_round_guards(
                         "session_id": session_id or "",
                         "rounds": round_idx + 1,
                         "blocked_tools": newly_blocked,
-                        "repeat_count": exact_repeat_count,
+                        "exact_repeat": exact_repeat,
+                        "fuzzy_repeat": fuzzy_repeat,
                     },
                 )
             )
@@ -367,7 +450,7 @@ def apply_post_round_guards(
                 "后续禁止继续调用它们。"
                 "请改用其他工具或更直接的方案完成任务。"
             )
-    if exact_repeat_count >= (state.loop_detect_window + 2):
+    if repeat_count >= abort_threshold:
         update.final_texts.append(
             "检测到任务陷入重复循环，已自动中止当前路径。"
             "请让我改用更直接的方式继续完成任务。"
@@ -388,4 +471,5 @@ __all__ = [
     "normalize_bash_command_signature",
     "tail_repeat_count",
     "update_planned_image_count",
+    "_fuzzy_signature_for_tool",
 ]

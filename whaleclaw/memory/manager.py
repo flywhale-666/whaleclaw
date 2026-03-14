@@ -8,7 +8,7 @@ import re
 from collections import defaultdict
 from datetime import UTC, datetime
 from math import exp
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from whaleclaw.memory.base import MemoryEntry, MemoryStore
 from whaleclaw.memory.summary import ConversationSummarizer
@@ -130,7 +130,7 @@ def _extract_json_block(text: str) -> dict[str, Any] | None:
         except Exception:
             continue
         if isinstance(obj, dict):
-            return obj
+            return cast(dict[str, Any], obj)
     return None
 
 
@@ -331,7 +331,7 @@ def _style_signal_hits(text: str) -> int:
     return sum(1 for p in patterns if re.search(p, text))
 
 
-def _infer_style_from_l0(l0: str) -> str:
+def _infer_style_from_l0(l0: str) -> str:  # pyright: ignore[reportUnusedFunction]
     txt = l0.strip().replace("\n", " ")
     if not txt:
         return ""

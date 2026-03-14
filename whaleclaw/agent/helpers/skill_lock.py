@@ -119,8 +119,10 @@ def build_skill_lock_system_message(skill_ids: list[str]) -> Message:
         role="system",
         content=(
             f"当前会话已锁定技能：{joined}。\n"
-            "执行时仅允许在这些技能范围内规划与调用，不要偏移到无关方案。\n"
-            "若需切换到其它技能，必须先征得用户明确同意。\n"
+            "核心任务必须优先使用锁定技能的方式完成，不要偏移到无关方案。\n"
+            "但如果用户请求中包含后续步骤（如把结果放到文档/PPT/表格中），"
+            "在锁定技能部分完成后，可以继续使用通用工具（bash、file_write、"
+            "ppt_edit、docx_edit 等）完成后续步骤，不需要先解锁。\n"
             "若用户明确回复“任务完成”，再解除该锁定。"
         ),
     )
@@ -153,11 +155,17 @@ def build_nano_banana_execution_system_message(
             f"1) 当前本轮模型是：{current_model}。若调用脚本，"
             f"必须把 `--model` 和 `--edit-model` 都设置为 `{current_model}`，"
             "不要继续沿用其它模型。\n"
-            "2) 对外回复只使用展示名“香蕉2”或“香蕉pro”，除非用户明确追问，不要暴露底层模型标识。\n"
-            "3) 若用户是在说“重试”“继续处理这张图”“改用香蕉pro重试”这类续跑语义，且没有上传新图，"
-            "默认复用最近一轮可用图片，不要再要求用户重新上传。\n"
+            "2) 对外回复只使用展示名“香蕉2”或“香蕉pro”，"
+            "除非用户明确追问，不要暴露底层模型标识。\n"
+            "3) 模式选择规则（非常重要）：\n"
+            "   - 文生图（--mode text）：用户描述了一个全新画面/题材，"
+            "不要加 --input-image，直接用 prompt 生成。\n"
+            "   - 图生图（--mode edit + --input-image）：仅当用户明确说"
+            "“处理这张图”“修改上一张”“重试”"
+            "“继续处理”等续跑/编辑语义时才使用。\n"
+            "   - 判断标准：如果用户的描述主题与历史图片无关，就是文生图。\n"
             "4) 图片引用规则：当前这张=最新一张；上一张=倒数第二张；再上一张=倒数第三张。\n"
-            "5) 当前可直接复用的历史图片绝对路径如下：\n"
+            "5) 仅在图生图模式下才需要以下历史图片路径，文生图模式请忽略：\n"
             f"{image_lines}"
         ),
     )
@@ -476,7 +484,8 @@ def _build_nano_banana_param_guard_reply(state: dict[str, object]) -> str:
         missing_prompts.append("请提供 Nano Banana API Key")
     if not param_satisfied(SkillParamItem(key="prompt", type="text"), state.get("prompt")):
         missing_prompts.append("请提供提示词")
-    image_count = int(state.get("images", 0)) if isinstance(state.get("images"), int) else 0
+    raw_images = state.get("images", 0)
+    image_count = int(raw_images) if isinstance(raw_images, int) else 0
     if image_count < 1:
         missing_prompts.append("请上传图片")
     if missing_prompts:
@@ -494,7 +503,8 @@ def nano_banana_missing_required(
     """Decide whether Nano Banana should stay in the fixed parameter-guard stage."""
     has_key = param_satisfied(SkillParamItem(key="api_key", type="api_key"), state.get("api_key"))
     has_prompt = param_satisfied(SkillParamItem(key="prompt", type="text"), state.get("prompt"))
-    image_count = int(state.get("images", 0)) if isinstance(state.get("images"), int) else 0
+    raw_images = state.get("images", 0)
+    image_count = int(raw_images) if isinstance(raw_images, int) else 0
     if not has_key or not has_prompt:
         return True
     return bool(image_count < 1 and control_message_only)
@@ -623,8 +633,140 @@ def select_native_tool_names(
     return selected
 
 
+_QUEUE_ADVANCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"^\s*继续\s*$"),
+    re.compile(r"^\s*下一步\s*$"),
+    re.compile(r"^\s*下一个\s*$"),
+    re.compile(r"^\s*(?:继续|下一步|下一个)\s*(?:吧|呗|啊|嘛|了)?\s*$"),
+    re.compile(r"^\s*(?:go|next|continue)\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(?:执行|开始)\s*(?:下一步|下一个)\s*$"),
+    re.compile(r"^\s*(?:好的?\s*)?(?:继续|下一步)\s*$"),
+)
+
+
+def is_queue_advance_confirmation(text: str) -> bool:
+    """用户是否回复了"继续"/"下一步"等推进确认。"""
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return any(p.search(stripped) for p in _QUEUE_ADVANCE_PATTERNS)
+
+
+def build_skill_queue_plan_messages(
+    skill_ids: list[str],
+    user_message: str,
+) -> list[Message]:
+    """构建让 LLM 做任务拆解的 prompt，控制在 ~200 tokens。"""
+    ids_str = ", ".join(skill_ids)
+    return [
+        Message(
+            role="system",
+            content=(
+                "你是一个任务规划器。用户消息涉及多个技能，请按执行顺序拆解为子任务。\n"
+                "输出严格 JSON 数组，每项包含 skill_id 和 task 字段。\n"
+                "skill_id 必须从给定列表中选择。task 用一句话描述该步要做什么。\n"
+                "如果某步的产出是下一步的输入，在 task 中说明。\n"
+                "只输出 JSON，不要其它文字。"
+            ),
+        ),
+        Message(
+            role="user",
+            content=f"可用技能: [{ids_str}]\n用户消息: {user_message}",
+        ),
+    ]
+
+
+def parse_skill_queue_plan(
+    llm_response: str,
+    skill_ids: list[str],
+) -> list[dict[str, str]]:
+    """解析 LLM 返回的 JSON 队列。解析失败返回空列表。"""
+    import json
+
+    text = llm_response.strip()
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return []
+    try:
+        raw = json.loads(text[start : end + 1])
+    except (json.JSONDecodeError, ValueError):
+        return []
+    if not isinstance(raw, list):
+        return []
+    allowed = set(skill_ids)
+    result: list[dict[str, str]] = []
+    for entry in raw:  # pyright: ignore[reportUnknownVariableType]
+        if not isinstance(entry, dict):
+            continue
+        sid = str(entry.get("skill_id", "")).strip()  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+        task = str(entry.get("task", "")).strip()  # pyright: ignore[reportUnknownMemberType,reportUnknownArgumentType]
+        if sid not in allowed or not task:
+            continue
+        result.append({"skill_id": sid, "task": task, "status": "pending", "output_hint": ""})
+    return result
+
+
+def build_skill_queue_status_message(
+    queue: list[dict[str, str]],
+    current_index: int,
+) -> str:
+    """构建队列整体状态文案。"""
+    lines: list[str] = ["收到复合任务，我将分步执行："]
+    for i, item in enumerate(queue):
+        sid = item.get("skill_id", "")
+        task = item.get("task", "")
+        if i < current_index:
+            tag = "已完成"
+        elif i == current_index:
+            tag = "进行中"
+        else:
+            tag = "待执行"
+        lines.append(f"  {i + 1}) [{tag}] {sid}: {task}")
+    lines.append(f"\n我先执行第 {current_index + 1} 步...")
+    return "\n".join(lines)
+
+
+def build_skill_queue_advance_message(
+    queue: list[dict[str, str]],
+    finished_index: int,
+) -> str:
+    """构建"当前步完成，下一步预告"的播报文案。"""
+    finished = queue[finished_index] if finished_index < len(queue) else None
+    next_index = finished_index + 1
+    has_next = next_index < len(queue)
+    lines: list[str] = []
+    if finished:
+        hint = finished.get("output_hint", "")
+        hint_text = f"（{hint}）" if hint else ""
+        lines.append(f"第 {finished_index + 1} 步完成！{hint_text}")
+    if has_next:
+        next_item = queue[next_index]
+        next_step = next_index + 1
+        next_task = next_item.get("task", "")
+        lines.append(
+            f'回复\u201c继续\u201d推进到第 {next_step} 步: '
+            f'{next_task}\uff1b'
+            '回复\u201c任务完成\u201d结束全部任务。'
+        )
+    else:
+        lines.append('全部子任务已完成！回复\u201c任务完成\u201d解除技能锁定。')
+    return "\n".join(lines)
+
+
+def skill_queue_has_next(
+    queue: list[dict[str, str]],
+    current_index: int,
+) -> bool:
+    """队列是否还有下一个待执行的步骤。"""
+    return current_index + 1 < len(queue)
+
+
 __all__ = [
     "build_skill_lock_system_message",
+    "build_skill_queue_advance_message",
+    "build_skill_queue_plan_messages",
+    "build_skill_queue_status_message",
     "build_skill_param_guard_reply",
     "capture_param_value",
     "detect_nano_banana_model_display",
@@ -652,5 +794,8 @@ __all__ = [
     "skill_explicitly_mentioned",
     "skill_trigger_mentioned",
     "skill_token_mentioned",
+    "is_queue_advance_confirmation",
+    "parse_skill_queue_plan",
+    "skill_queue_has_next",
     "update_guard_state",
 ]

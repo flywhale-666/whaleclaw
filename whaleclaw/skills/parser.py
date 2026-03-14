@@ -11,6 +11,9 @@ import yaml
 from pydantic import BaseModel, Field
 
 
+_BUNDLED_SKILLS_DIR = Path(__file__).resolve().parent / "bundled"
+
+
 class Skill(BaseModel):
     """Skill parsed from SKILL.md."""
 
@@ -23,6 +26,7 @@ class Skill(BaseModel):
     examples: list[str] = Field(default_factory=list)
     max_tokens: int = 800
     lock_session: bool = False
+    is_user_installed: bool = False
     param_guard: SkillParamGuard | None = None
     source_path: Path
 
@@ -200,6 +204,14 @@ class SkillParser:
         examples = [e.strip() for e in examples_text.splitlines() if e.strip()]
 
         skill_id = path.parent.name
+        resolved = path.resolve()
+        bundled_resolved = _BUNDLED_SKILLS_DIR.resolve()
+        is_user = True
+        try:
+            resolved.relative_to(bundled_resolved)
+            is_user = False
+        except ValueError:
+            pass
 
         return Skill(
             id=skill_id,
@@ -211,6 +223,7 @@ class SkillParser:
             examples=examples,
             max_tokens=max_tokens,
             lock_session=lock_session,
+            is_user_installed=is_user,
             param_guard=param_guard,
             source_path=path,
         )

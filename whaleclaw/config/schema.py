@@ -1,6 +1,6 @@
 """Pydantic v2 configuration schema for WhaleClaw."""
 
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
@@ -51,7 +51,14 @@ class ProviderConfig(BaseModel):
 
 
 class ModelsConfig(BaseModel):
-    """Configuration for all LLM providers."""
+    """Configuration for all LLM providers.
+
+    内置 provider 用显式字段声明；用户通过「自定义」添加的 OpenAI
+    兼容 provider 存储在 ``model_extra`` 中（Pydantic ``extra='allow'``），
+    可通过 :meth:`all_provider_names` / :meth:`get_provider` 统一访问。
+    """
+
+    model_config = {"extra": "allow"}
 
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
@@ -62,6 +69,30 @@ class ModelsConfig(BaseModel):
     moonshot: ProviderConfig = Field(default_factory=ProviderConfig)
     google: ProviderConfig = Field(default_factory=ProviderConfig)
     nvidia: ProviderConfig = Field(default_factory=ProviderConfig)
+
+    BUILTIN_PROVIDERS: ClassVar[tuple[str, ...]] = (
+        "anthropic", "openai", "deepseek", "qwen", "zhipu",
+        "minimax", "moonshot", "google", "nvidia",
+    )
+
+    def custom_provider_names(self) -> list[str]:
+        """返回所有用户自定义 provider 名称。"""
+        extra = self.model_extra or {}
+        return [k for k, v in extra.items() if isinstance(v, dict)]
+
+    def all_provider_names(self) -> list[str]:
+        """返回所有 provider 名称（内置 + 自定义）。"""
+        return list(self.BUILTIN_PROVIDERS) + self.custom_provider_names()
+
+    def get_provider(self, name: str) -> ProviderConfig:
+        """按名称获取 ProviderConfig，自定义 provider 从 extra 中解析。"""
+        if name in self.BUILTIN_PROVIDERS:
+            return getattr(self, name)
+        extra = self.model_extra or {}
+        raw = extra.get(name)
+        if isinstance(raw, dict):
+            return ProviderConfig.model_validate(raw)
+        return ProviderConfig()
 
 
 class SummarizerConfig(BaseModel):

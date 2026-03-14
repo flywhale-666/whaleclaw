@@ -7,21 +7,22 @@ import re
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any, cast
 
 from whaleclaw.memory.base import MemoryEntry, MemorySearchResult, MemoryStore
 
 
-def _serialize_entry(entry: MemoryEntry) -> dict:
-    d = entry.model_dump(mode="json")
+def _serialize_entry(entry: MemoryEntry) -> dict[str, Any]:
+    d: dict[str, Any] = entry.model_dump(mode="json")
     d["created_at"] = entry.created_at.isoformat()
     d["last_accessed"] = entry.last_accessed.isoformat()
     return d
 
 
-def _deserialize_entry(d: dict) -> MemoryEntry:
-    d = dict(d)
-    d["created_at"] = datetime.fromisoformat(d["created_at"])
-    d["last_accessed"] = datetime.fromisoformat(d["last_accessed"])
+def _deserialize_entry(raw: dict[str, Any]) -> MemoryEntry:
+    d: dict[str, Any] = dict(raw)
+    d["created_at"] = datetime.fromisoformat(str(d["created_at"]))
+    d["last_accessed"] = datetime.fromisoformat(str(d["last_accessed"]))
     return MemoryEntry.model_validate(d)
 
 
@@ -35,14 +36,21 @@ class SimpleMemoryStore(MemoryStore):
             self._load()
 
     def _load(self) -> None:
-        path = self._persist_dir / "memory.json"  # type: ignore[union-attr]
+        if not self._persist_dir:
+            return
+        path = self._persist_dir / "memory.json"
         if not path.exists():
             return
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            for d in data.get("entries", []):
-                entry = _deserialize_entry(d)
-                self._entries[entry.id] = entry
+            parsed: Any = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(parsed, dict):
+                return
+            raw = cast(dict[str, Any], parsed)
+            entries: list[Any] = raw.get("entries", [])
+            for d in entries:
+                if isinstance(d, dict):
+                    entry = _deserialize_entry(cast(dict[str, Any], d))
+                    self._entries[entry.id] = entry
         except (OSError, json.JSONDecodeError, KeyError):
             pass
 
@@ -51,7 +59,7 @@ class SimpleMemoryStore(MemoryStore):
             return
         self._persist_dir.mkdir(parents=True, exist_ok=True)
         path = self._persist_dir / "memory.json"
-        data = {"entries": [_serialize_entry(e) for e in self._entries.values()]}
+        data: dict[str, Any] = {"entries": [_serialize_entry(e) for e in self._entries.values()]}
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
     async def add(self, content: str, source: str, tags: list[str] | None = None) -> MemoryEntry:

@@ -36,7 +36,7 @@ class TestModelRouter:
 
     def test_unknown_provider(self) -> None:
         router = ModelRouter(ModelsConfig())
-        with pytest.raises(ProviderError, match="不支持"):
+        with pytest.raises(ProviderError, match="未配置 api_key"):
             router.resolve("unknown/model")
 
     def test_caches_provider(self, monkeypatch: pytest.MonkeyPatch) -> None:

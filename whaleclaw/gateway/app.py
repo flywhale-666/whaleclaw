@@ -54,6 +54,11 @@ from whaleclaw.skills.clawhub import (
 from whaleclaw.skills.clawhub import (
     search_skills as clawhub_search_skills,
 )
+from whaleclaw.tools.mcp_manage import (
+    aggregate_mcp_servers,
+    is_mcporter_available,
+    remove_mcporter_server,
+)
 from whaleclaw.tools.registry import ToolRegistry
 from whaleclaw.utils.log import get_logger
 from whaleclaw.version import __version__
@@ -104,6 +109,7 @@ def _categorize_tool_name(name: str) -> str:
         "memory_search": "memory",
         "memory_add": "memory",
         "memory_list": "memory",
+        "mcp_manage": "integration",
     }
     if name in explicit:
         return explicit[name]
@@ -338,6 +344,67 @@ def create_app(config: WhaleclawConfig) -> FastAPI:
                 s = await mgr.get(session_id)
                 if s:
                     await mgr.add_message(s, "assistant", content)
+
+        elif action.type == "agent":
+            session_id = action.target
+            text = str(action.payload.get("text", ""))
+            if not (session_id and text):
+                return
+
+            from whaleclaw.agent.single_agent import run_agent
+            from whaleclaw.gateway.ws import broadcast_all
+
+            mgr = state.get("manager")
+            session_manager = mgr if isinstance(mgr, SessionManager) else None
+            session: Session | None = None
+            if session_manager is not None:
+                session = await session_manager.get(session_id)
+            if session is None:
+                return
+
+            notice = f"⏰ 定时任务触发：{text}"
+            await push_to_session(session_id, make_message(session_id, notice))
+            if session_manager is not None:
+                await session_manager.add_message(session, "user", text)
+
+            registry = state.get("registry")
+            memory_manager = state.get("memory_manager")
+            session_store_ref: SessionStore | None = store  # noqa: F841
+            group_compressor = state.get("group_compressor")
+            try:
+                reply = await run_agent(
+                    message=text,
+                    session_id=session.id,
+                    config=config,
+                    session=session,
+                    router=router,
+                    registry=registry,
+                    session_manager=session_manager,
+                    session_store=store,
+                    memory_manager=memory_manager if isinstance(memory_manager, MemoryManager) else None,
+                    group_compressor=group_compressor if isinstance(group_compressor, SessionGroupCompressor) else None,
+                )
+                if reply.strip() and session_manager is not None:
+                    await session_manager.add_message(session, "assistant", reply)
+                await push_to_session(session_id, make_message(session_id, reply))
+                pushed = await push_to_session(session_id, make_message(session_id, ""))
+                if not pushed:
+                    await broadcast_all(make_message(session_id, reply))
+                if not pushed and feishu_channel is not None:
+                    if session.channel == "feishu" and feishu_channel.client:
+                        await feishu_channel.client.send_message(
+                            session.peer_id,
+                            "text",
+                            json.dumps({"text": reply}, ensure_ascii=False),
+                        )
+            except Exception as exc:
+                import structlog
+                structlog.get_logger().error(
+                    "cron_agent_fire_failed",
+                    job_id=job_id,
+                    session_id=session_id,
+                    error=str(exc),
+                )
 
     cron_scheduler = CronScheduler(on_fire=_on_cron_fire)
     plugin_registry = PluginRegistry()
@@ -631,22 +698,8 @@ def create_app(config: WhaleclawConfig) -> FastAPI:
         providers_cfg = config.models
         available: list[dict[str, object]] = []
 
-        all_providers = [
-            "anthropic",
-            "openai",
-            "deepseek",
-            "qwen",
-            "zhipu",
-            "minimax",
-            "moonshot",
-            "google",
-            "nvidia",
-        ]
-
-        for pname in all_providers:
-            pcfg = getattr(providers_cfg, pname, None)
-            if not pcfg:
-                continue
+        for pname in providers_cfg.all_provider_names():
+            pcfg = providers_cfg.get_provider(pname)
             has_auth = bool(pcfg.api_key) or (pcfg.auth_mode == "oauth" and pcfg.oauth_access)
             if not has_auth:
                 continue
@@ -1186,6 +1239,26 @@ def create_app(config: WhaleclawConfig) -> FastAPI:
                 }
             )
         return result
+
+    # ── MCP REST ───────────────────────────────────────────
+
+    @app.get("/api/mcp/servers")
+    async def _api_list_mcp_servers() -> JSONResponse:
+        """聚合内置 MCP + mcporter CLI 两个来源的服务列表。"""
+        servers = aggregate_mcp_servers()
+        return JSONResponse({
+            "servers": servers,
+            "mcporter_available": is_mcporter_available(),
+        })
+
+    @app.delete("/api/mcp/servers/{server_id}")
+    async def _api_delete_mcp_server(server_id: str, source: str = "mcporter") -> JSONResponse:
+        if source == "mcporter":
+            ok = remove_mcporter_server(server_id)
+            if ok:
+                return JSONResponse({"ok": True})
+            return JSONResponse({"error": "删除失败（mcporter 未安装或服务不存在）"}, status_code=400)
+        return JSONResponse({"error": f"不支持删除来源为 {source} 的服务"}, status_code=400)
 
     # ── Plugins REST ──────────────────────────────────────
 

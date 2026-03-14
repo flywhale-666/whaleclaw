@@ -129,7 +129,7 @@ class CronManageTool(Tool):
             if raw_min is None:
                 return ToolResult(success=False, output="", error="at 类型需要 minutes 参数")
             try:
-                minutes = int(raw_min)
+                minutes = int(str(raw_min))
             except (TypeError, ValueError):
                 return ToolResult(success=False, output="", error="minutes 必须为整数")
             if minutes < 1:
@@ -158,7 +158,7 @@ class CronManageTool(Tool):
             if raw_min is None:
                 return ToolResult(success=False, output="", error="every 类型需要 minutes 参数")
             try:
-                minutes = int(raw_min)
+                minutes = int(str(raw_min))
             except (TypeError, ValueError):
                 return ToolResult(success=False, output="", error="minutes 必须为整数")
             if minutes < 1:

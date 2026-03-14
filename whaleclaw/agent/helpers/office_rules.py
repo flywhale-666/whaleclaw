@@ -53,14 +53,13 @@ def looks_like_ppt_generation_script(text: str) -> bool:
     low = text.lower()
     if not low:
         return False
-    hints = (
+    ppt_specific_hints = (
         "from pptx import presentation",
         "pptx import presentation",
         "presentation()",
-        ".save(",
         ".pptx",
     )
-    return any(hint in low for hint in hints)
+    return any(hint in low for hint in ppt_specific_hints)
 
 
 def looks_like_ppt_generation_command(command: str) -> bool:
@@ -262,6 +261,28 @@ def is_office_edit_request(text: str) -> bool:
     query = text.lower()
     if not query:
         return False
+
+    create_hints = (
+        "做一个",
+        "做个",
+        "创建一个",
+        "创建个",
+        "新建一个",
+        "新建个",
+        "生成一个",
+        "生成个",
+        "写一个",
+        "写个",
+    )
+    doc_type_hints = ("word", "docx", "ppt", "pptx", "excel", "xlsx", "文档", "表格", "幻灯片")
+    for c_hint in create_hints:
+        if c_hint in query:
+            for d_hint in doc_type_hints:
+                pos = query.find(c_hint)
+                d_pos = query.find(d_hint, pos)
+                if d_pos != -1 and d_pos - pos - len(c_hint) < 10:
+                    return False
+
     edit_hints = (
         "改",
         "修改",
@@ -381,6 +402,24 @@ def is_followup_edit_message(text: str) -> bool:
     query = text.lower()
     if not query:
         return False
+
+    create_hints = (
+        "做一个", "做个", "创建一个", "创建个",
+        "新建一个", "新建个", "生成一个", "生成个",
+        "写一个", "写个",
+    )
+    doc_type_hints = (
+        "word", "docx", "ppt", "pptx", "excel", "xlsx",
+        "文档", "表格", "幻灯片",
+    )
+    for c_hint in create_hints:
+        if c_hint in query:
+            for d_hint in doc_type_hints:
+                pos = query.find(c_hint)
+                d_pos = query.find(d_hint, pos)
+                if d_pos != -1 and d_pos - pos - len(c_hint) < 10:
+                    return False
+
     hints = (
         "改一下",
         "修改",

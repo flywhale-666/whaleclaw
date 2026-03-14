@@ -68,7 +68,7 @@ _BOLD_PATH_RE = re.compile(
     re.MULTILINE,
 )
 _BARE_PATH_RE = re.compile(
-    r"(?:^|[\s`])(/[^`\s]+\.(?:"
+    r"(?:^|[\s`：:])(/[^`\s]+\.(?:"
     + "|".join(ext.lstrip(".") for ext in sorted(_FILE_EXTS))
     + r"))(?:[\s`]|$)",
     re.MULTILINE,
@@ -695,14 +695,8 @@ class FeishuBot:
 
         providers_cfg = self._whaleclaw_config.models
         result: list[str] = []
-        all_providers = [
-            "anthropic", "openai", "deepseek", "qwen", "zhipu",
-            "minimax", "moonshot", "google", "nvidia",
-        ]
-        for pname in all_providers:
-            pcfg = getattr(providers_cfg, pname, None)
-            if not pcfg:
-                continue
+        for pname in providers_cfg.all_provider_names():
+            pcfg = providers_cfg.get_provider(pname)
             has_auth = bool(pcfg.api_key) or (
                 getattr(pcfg, "auth_mode", "api_key") == "oauth" and bool(pcfg.oauth_access)
             )

@@ -39,6 +39,18 @@ def _strip_control_chars(text: str) -> str:
     )
 
 
+_BROKEN_PYTHON_PATH_RE = re.compile(
+    r"(?:/[^\s;|&\"']+)?/\./python/bin/python3(?:\.12)?"
+)
+
+
+def _fix_broken_python_path(command: str) -> str:
+    """修复 LLM 拼出的错误 Python 路径，如 /Users/x/./python/bin/python3.12"""
+    if "/./python/bin/" not in command:
+        return command
+    return _BROKEN_PYTHON_PATH_RE.sub(str(_PROJECT_PYTHON), command)
+
+
 def _prefer_project_python(command: str) -> str:
     """Rewrite bare python/python3 to project-embedded python when available."""
     if not _PROJECT_PYTHON.is_file():
@@ -89,7 +101,7 @@ class BashTool(Tool):
     async def execute(self, **kwargs: Any) -> ToolResult:
         raw_command: str = kwargs.get("command", "")
         command = _prefer_project_python_for_direct_script(
-            _prefer_project_python(_strip_control_chars(raw_command))
+            _prefer_project_python(_fix_broken_python_path(_strip_control_chars(raw_command)))
         )
         timeout: int = int(kwargs.get("timeout", 30))
         background = bool(kwargs.get("background", False))

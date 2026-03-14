@@ -20,7 +20,7 @@ class SecurityPolicy(BaseModel):
 
     sandbox: bool = False
     tools: ToolPermission = Field(default_factory=ToolPermission)
-    max_tool_rounds: int = 25
+    max_tool_rounds: int = 50
     allow_file_write: bool = True
     allow_network: bool = True
     allowed_paths: list[str] = Field(default_factory=list)

@@ -105,7 +105,7 @@ class ChatCommand:
             return "上下文压缩功能已禁用。可在配置中设置 agent.summarizer.enabled = true 启用。"
 
         from whaleclaw.providers.base import Message
-        from whaleclaw.sessions.context_window import _estimate_tokens
+        from whaleclaw.sessions.context_window import estimate_tokens
 
         non_system = [m for m in session.messages if m.role != "system"]
         protected_count = min(6, len(non_system))
@@ -143,7 +143,7 @@ class ChatCommand:
         l0_tokens = sum(s.token_count for s in l0)
         l1_tokens = sum(s.token_count for s in l1)
 
-        original_tokens = sum(_estimate_tokens(m.content) for m in msgs)
+        original_tokens = sum(estimate_tokens(m.content) for m in msgs)
 
         return (
             f"已为 {len(to_compress)} 条历史消息生成分层摘要。\n"

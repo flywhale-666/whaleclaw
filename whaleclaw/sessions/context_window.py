@@ -163,7 +163,7 @@ def _build_compacted_range_message(
     body = _clip_tokens("\n".join(parts), budget)
     if not body:
         return None
-    return Message(role="assistant", content=f"[历史压缩摘要]\n{body}")
+    return Message(role="system", content=f"[以下是本会话的历史摘要，供你了解上下文背景]\n{body}")
 
 
 def _keep_recent_with_budget(  # pyright: ignore[reportUnusedFunction]

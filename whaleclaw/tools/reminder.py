@@ -14,7 +14,7 @@ from whaleclaw.tools.base import Tool, ToolDefinition, ToolParameter, ToolResult
 
 
 class ReminderTool(Tool):
-    """Set a one-shot reminder N minutes from now."""
+    """Set a one-shot reminder or scheduled task N minutes from now."""
 
     def __init__(self, scheduler: CronScheduler) -> None:
         self._scheduler = scheduler
@@ -24,17 +24,31 @@ class ReminderTool(Tool):
     def definition(self) -> ToolDefinition:
         return ToolDefinition(
             name="reminder",
-            description="Set a reminder to notify after N minutes.",
+            description=(
+                "Set a timer for N minutes from now. "
+                "Use action='agent' to auto-execute (the message will be sent "
+                "to the agent as a new task). "
+                "Use action='message' (default) to just notify the user."
+            ),
             parameters=[
                 ToolParameter(
                     name="message",
                     type="string",
-                    description="Reminder message.",
+                    description="Reminder text, or task instruction when action='agent'.",
                 ),
                 ToolParameter(
                     name="minutes",
                     type="integer",
                     description="Minutes from now to trigger.",
+                ),
+                ToolParameter(
+                    name="action",
+                    type="string",
+                    description=(
+                        "'agent' = auto-execute message as a task when time is up; "
+                        "'message' = just send a notification (default)."
+                    ),
+                    required=False,
                 ),
             ],
         )
@@ -60,6 +74,10 @@ class ReminderTool(Tool):
         if minutes < 1:
             return ToolResult(success=False, output="", error="minutes 必须大于 0")
 
+        action_type = str(kwargs.get("action", "message")).strip().lower()
+        if action_type not in ("message", "agent"):
+            action_type = "message"
+
         now = datetime.now()
         target = now + timedelta(minutes=minutes)
         job = CronJob(
@@ -67,7 +85,7 @@ class ReminderTool(Tool):
             name=f"提醒: {message[:20]}",
             schedule_obj=Schedule(kind="at", at=target),
             action=CronAction(
-                type="message",
+                type=action_type,  # pyright: ignore[reportArgumentType]
                 target=self.current_session_id or "user",
                 payload={"text": message},
             ),
@@ -76,6 +94,11 @@ class ReminderTool(Tool):
             one_shot=True,
         )
         await self._scheduler.add_job(job)
+        if action_type == "agent":
+            return ToolResult(
+                success=True,
+                output=f"定时任务已设置，{minutes} 分钟后自动执行: {message}",
+            )
         return ToolResult(
             success=True,
             output=f"提醒已设置，{minutes} 分钟后通知",

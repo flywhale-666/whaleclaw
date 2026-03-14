@@ -8,7 +8,7 @@ const md = window.markdownit({
   breaks: true,
   linkify: true,
   highlight(str, lang) {
-    if (lang && hljs.getLanguage(lang)) {
+    if (lang && typeof hljs !== 'undefined' && hljs.getLanguage(lang)) {
       try {
         const html = hljs.highlight(str, { language: lang }).value;
         return `<pre class="hljs"><code>${html}</code><button class="copy-btn" onclick="copyCode(this)">复制</button></pre>`;
@@ -140,6 +140,9 @@ createApp({
     const publishVersionInput = ref('0.1.0');
     const uiAlertMessage = ref('');
     const pendingClearMemoryStyle = ref(false);
+    const mcpServers = ref([]);
+    const mcpLoading = ref(false);
+    const mcporterAvailable = ref(false);
 
     const activeSession = computed(() =>
       sessions.value.find((s) => s.id === activeSessionId.value)
@@ -559,6 +562,25 @@ createApp({
       try {
         tools.value = await apiFetch('/api/tools');
       } catch { /* ignore */ }
+    }
+
+    async function loadMcpServers() {
+      mcpLoading.value = true;
+      try {
+        const data = await apiFetch('/api/mcp/servers');
+        mcpServers.value = data.servers || [];
+        mcporterAvailable.value = !!data.mcporter_available;
+      } catch { /* ignore */ }
+      mcpLoading.value = false;
+    }
+
+    async function removeMcpServer(serverId, source) {
+      try {
+        await apiFetch(`/api/mcp/servers/${encodeURIComponent(serverId)}?source=${encodeURIComponent(source)}`, { method: 'DELETE' });
+        mcpServers.value = mcpServers.value.filter(s => (s.id || s.name) !== serverId);
+      } catch (e) {
+        showUiAlert(e.message || '删除 MCP 服务失败');
+      }
     }
 
     const _MA_SCENARIO_BUILTINS = [
@@ -2002,6 +2024,8 @@ createApp({
       renderSkillMarkdown, safeRenderSkillMarkdown,
       addImageFiles, removeImage, addFiles, removeFile, onPaste, onDrop, onDragOver, triggerFileInput,
       uiAlertMessage, closeUiAlert,
+      mcpServers, mcpLoading, mcporterAvailable, loadMcpServers, removeMcpServer,
+      loadSkills, loadTools,
     };
   },
 
@@ -2065,6 +2089,7 @@ createApp({
           <button class="sidebar-tab" :class="{ active: activeTab === 'skills' }" @click="activeTab = 'skills'; loadSkills(); loadClawhubConfig()">🧩 技能</button>
           <button class="sidebar-tab" :class="{ active: activeTab === 'multi-agent' }" @click="activeTab = 'multi-agent'; loadModels(); loadMultiAgentConfig()">🧠 多Agent</button>
           <button class="sidebar-tab" :class="{ active: activeTab === 'tools' }" @click="activeTab = 'tools'; loadTools()">🔧 工具</button>
+          <button class="sidebar-tab" :class="{ active: activeTab === 'mcp' }" @click="activeTab = 'mcp'; loadMcpServers()">🔌 MCP</button>
         </div>
       </aside>
 
@@ -2108,6 +2133,7 @@ createApp({
           <h2 v-if="activeTab === 'skills'">🧩 技能管理</h2>
           <h2 v-if="activeTab === 'multi-agent'">🧠 多Agent 编排</h2>
           <h2 v-if="activeTab === 'tools'">🔧 工具列表 <small>({{ tools.length }})</small></h2>
+          <h2 v-if="activeTab === 'mcp'">🔌 MCP 服务 <small>({{ mcpServers.length }})</small></h2>
         </div>
 
         <!-- Chat Tab -->
@@ -2430,6 +2456,34 @@ createApp({
                   </div>
                 </div>
               </details>
+            </div>
+          </div>
+        </template>
+
+        <!-- MCP Tab -->
+        <template v-if="activeTab === 'mcp'">
+          <div class="tab-content">
+            <div class="tab-content-body">
+              <div v-if="mcpLoading" class="tab-empty">加载中…</div>
+              <div v-else-if="!mcpServers.length" class="tab-empty">
+                暂无 MCP 服务。<br>
+                通过 Agent 对话安装 MCP，或使用 mcporter CLI 配置后，服务会自动出现此列表。
+              </div>
+              <div v-else class="panel-grid">
+                <div v-for="s in mcpServers" :key="s.id || s.name" class="panel-card">
+                  <div class="panel-card-main">
+                    <div class="panel-card-title" style="display:flex;align-items:center;gap:6px">
+                      {{ s.name || s.id }}
+                      <span class="source-badge" :class="s.source">{{ s.source === 'mcporter' ? 'mcporter' : '内置' }}</span>
+                    </div>
+                    <div class="panel-card-desc" v-if="s.transport">{{ s.transport }}</div>
+                    <div class="panel-card-desc" v-if="s.status" style="margin-top:2px;font-size:12px">状态: {{ s.status }}</div>
+                  </div>
+                  <div style="display:flex;gap:6px;margin-top:8px">
+                    <button class="btn-sm btn-danger" @click="removeMcpServer(s.id || s.name, s.source)">删除</button>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </template>

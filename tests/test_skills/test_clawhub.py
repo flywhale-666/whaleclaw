@@ -1,7 +1,6 @@
 """Tests for ClawHub skill search behavior."""
 
-from __future__ import annotations
-
+import contextlib
 import json
 from pathlib import Path
 
@@ -256,3 +255,128 @@ def test_publish_via_http_includes_accept_license_terms(monkeypatch, tmp_path: P
     assert captured["url"] == "https://clawhub.ai/api/v1/skills"
     payload = json.loads(str(captured["data"]["payload"]))
     assert payload["acceptLicenseTerms"] is True
+
+
+def test_read_clawhub_global_config_merges_legacy_token(
+    monkeypatch, tmp_path: Path
+) -> None:  # noqa: ANN001
+    monkeypatch.delenv("CLAWHUB_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("CLAWDHUB_CONFIG_PATH", raising=False)
+    monkeypatch.setattr(clawhub.platform, "system", lambda: "Linux")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+
+    main_dir = tmp_path / "clawhub"
+    legacy_dir = tmp_path / "clawdhub"
+    main_dir.mkdir()
+    legacy_dir.mkdir()
+    (main_dir / "config.json").write_text('{"token": "", "registry": "main"}', encoding="utf-8")
+    (legacy_dir / "config.json").write_text(
+        '{"token": "legacy-token", "legacy_only": true}',
+        encoding="utf-8",
+    )
+
+    cfg = clawhub._read_clawhub_global_config()
+
+    assert cfg["token"] == "legacy-token"
+    assert cfg["registry"] == "main"
+    assert cfg["legacy_only"] is True
+
+
+def test_search_via_http_uses_global_token_when_api_token_missing(monkeypatch) -> None:  # noqa: ANN001
+    monkeypatch.setattr(clawhub, "_read_clawhub_global_config", lambda: {"token": "cfg-token"})
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self) -> dict[str, object]:
+            return {"results": []}
+
+    class _Client:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001, ANN204
+            return False
+
+        def get(self, url: str, params: dict[str, object], headers: dict[str, str]) -> _Resp:
+            captured["url"] = url
+            captured["params"] = params
+            captured["headers"] = headers
+            return _Resp()
+
+    monkeypatch.setattr(clawhub.httpx, "Client", lambda **kwargs: _Client())
+
+    clawhub._search_via_http(
+        query="banana",
+        registry_url="https://clawhub.ai",
+        api_token=None,
+        limit=20,
+    )
+
+    assert captured["headers"] == {
+        "Accept": "application/json",
+        "Authorization": "Bearer cfg-token",
+    }
+
+
+def test_install_via_http_uses_global_token_when_api_token_missing(
+    monkeypatch, tmp_path: Path
+) -> None:  # noqa: ANN001
+    monkeypatch.setattr(clawhub, "_read_clawhub_global_config", lambda: {"token": "cfg-token"})
+    captured: dict[str, object] = {}
+
+    class _Resp:
+        status_code = 200
+        content = b"not-a-real-zip"
+        text = ""
+
+    class _Client:
+        def __enter__(self):  # noqa: ANN204
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:  # noqa: ANN001, ANN204
+            return False
+
+        def get(self, url: str, params: dict[str, object], headers: dict[str, str]) -> _Resp:
+            captured["url"] = url
+            captured["params"] = params
+            captured["headers"] = headers
+            return _Resp()
+
+    monkeypatch.setattr(clawhub.httpx, "Client", lambda **kwargs: _Client())
+
+    with contextlib.suppress(clawhub.ClawHubCliError):
+        clawhub._install_via_http(
+            slug="demo-skill",
+            version=None,
+            registry_url="https://clawhub.ai",
+            install_dir=tmp_path,
+            api_token=None,
+        )
+
+    assert captured["headers"] == {"Authorization": "Bearer cfg-token"}
+
+
+def test_search_skills_does_not_wrap_http_error_prefix_twice(monkeypatch) -> None:  # noqa: ANN001
+    clawhub._search_cache.clear()
+    clawhub._detail_cache.clear()
+    monkeypatch.setattr(
+        clawhub,
+        "_search_via_http",
+        lambda **_: (_ for _ in ()).throw(
+            clawhub.ClawHubCliError("搜索失败: HTTP 429 too many requests")
+        ),
+    )
+
+    try:
+        clawhub.search_skills(
+            query="banana",
+            registry_url="https://clawhub.ai",
+            workspace_dir=Path.cwd(),
+            limit=20,
+        )
+    except clawhub.ClawHubCliError as exc:
+        assert str(exc) == "搜索失败: HTTP 429 too many requests"
+    else:
+        raise AssertionError("expected ClawHubCliError")

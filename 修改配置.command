@@ -66,7 +66,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
   },
   "agent": {
     "model": "deepseek/deepseek-chat",
-    "max_tool_rounds": 25,
+    "max_tool_rounds": 50,
     "thinking_level": "off",
     "summarizer": {
       "model": "zhipu/glm-4.7-flash",

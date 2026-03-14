@@ -66,14 +66,13 @@ def _resolve_clawhub_bin() -> str | None:
     path_bin = shutil.which("clawhub")
     if path_bin:
         return path_bin
-    roots = [
-        Path.cwd(),
-        Path(__file__).resolve().parents[2],
-    ]
+    repo_root = Path(__file__).resolve().parents[2]
+    roots = [Path.cwd(), repo_root]
     for root in roots:
-        local_bin = root / ".local" / "npm-global" / "bin" / "clawhub"
-        if local_bin.is_file():
-            return str(local_bin)
+        for sub in ("node/bin/clawhub", ".local/npm-global/bin/clawhub"):
+            candidate = root / sub
+            if candidate.is_file():
+                return str(candidate)
     return None
 
 
@@ -83,17 +82,16 @@ def _resolve_npm_bin() -> str | None:
         p = Path(env_npm).expanduser()
         if p.is_file():
             return str(p)
+    repo_root = Path(__file__).resolve().parents[2]
+    roots = [Path.cwd(), repo_root]
+    for root in roots:
+        for sub in ("node/bin/npm", ".local/node/bin/npm"):
+            candidate = root / sub
+            if candidate.is_file():
+                return str(candidate)
     path_npm = shutil.which("npm")
     if path_npm:
         return path_npm
-    roots = [
-        Path.cwd(),
-        Path(__file__).resolve().parents[2],
-    ]
-    for root in roots:
-        local_npm = root / ".local" / "node" / "bin" / "npm"
-        if local_npm.is_file():
-            return str(local_npm)
     return None
 
 
@@ -109,10 +107,16 @@ def _build_env(
     if api_token:
         env["CLAWHUB_TOKEN"] = api_token
     repo_root = Path(__file__).resolve().parents[2]
+    embedded_node_bin = repo_root / "node" / "bin"
     local_node_bin = repo_root / ".local" / "node" / "bin"
     local_npm_bin = repo_root / ".local" / "npm-global" / "bin"
-    path_parts = [str(local_npm_bin), str(local_node_bin), env.get("PATH", "")]
-    env["PATH"] = ":".join(part for part in path_parts if part)
+    path_parts = [
+        str(embedded_node_bin),
+        str(local_npm_bin),
+        str(local_node_bin),
+        env.get("PATH", ""),
+    ]
+    env["PATH"] = os.pathsep.join(part for part in path_parts if part)
     return env
 
 
@@ -136,19 +140,27 @@ def _run(args: list[str], *, env: dict[str, str]) -> str:
 
 
 def install_clawhub_cli() -> dict[str, str]:
-    """Install clawhub CLI into project-local prefix via npm."""
+    """Install clawhub CLI into project-embedded node/ prefix via npm."""
     npm_bin = _resolve_npm_bin()
     if not npm_bin:
         raise ClawHubCliError("未检测到 npm，请先安装 Node.js")
 
     repo_root = Path(__file__).resolve().parents[2]
-    prefix_dir = repo_root / ".local" / "npm-global"
-    prefix_dir.mkdir(parents=True, exist_ok=True)
+    embedded_node = repo_root / "node"
+    if embedded_node.is_dir():
+        prefix_dir = embedded_node
+    else:
+        prefix_dir = repo_root / ".local" / "npm-global"
+        prefix_dir.mkdir(parents=True, exist_ok=True)
 
     env = os.environ.copy()
-    local_node_bin = repo_root / ".local" / "node" / "bin"
-    path_parts = [str(prefix_dir / "bin"), str(local_node_bin), env.get("PATH", "")]
-    env["PATH"] = ":".join(p for p in path_parts if p)
+    path_parts = [
+        str(embedded_node / "bin"),
+        str(repo_root / ".local" / "npm-global" / "bin"),
+        str(repo_root / ".local" / "node" / "bin"),
+        env.get("PATH", ""),
+    ]
+    env["PATH"] = os.pathsep.join(p for p in path_parts if p)
 
     proc = subprocess.run(
         [npm_bin, "i", "-g", "clawhub", "--prefix", str(prefix_dir)],
@@ -806,11 +818,12 @@ def search_skills(
     limit: int = 100,
 ) -> list[dict[str, object]]:
     """Search ClawHub skills via HTTP API, then enrich via HTTP detail API."""
+    resolved_api_token = _resolve_clawhub_api_token(api_token)
     search_limit = max(1, min(limit, 200))
     cache_key = _search_cache_key(
         query=query,
         registry_url=registry_url,
-        api_token=api_token,
+        api_token=resolved_api_token,
         limit=search_limit,
     )
     cached = _cache_get(_search_cache, cache_key, _SEARCH_CACHE_TTL_SECONDS)
@@ -821,11 +834,11 @@ def search_skills(
         items = _search_via_http(
             query=query,
             registry_url=registry_url,
-            api_token=api_token,
+            api_token=resolved_api_token,
             limit=search_limit,
         )
     except Exception as exc:
-        raise ClawHubCliError(f"HTTP 搜索失败: {_clean_cli_error(str(exc))}") from exc
+        raise ClawHubCliError(_clean_cli_error(str(exc))) from exc
     if items:
         decorated = _decorate_results(items=items, registry_url=registry_url)[:limit]
         _cache_put(_search_cache, cache_key, decorated, _SEARCH_CACHE_TTL_SECONDS)
@@ -845,20 +858,21 @@ def install_skill(
 ) -> str:
     """Install a ClawHub skill by slug (CLI first, HTTP fallback)."""
     _validate_slug(slug)
+    resolved_api_token = _resolve_clawhub_api_token(api_token)
     if not is_clawhub_cli_available():
         _install_via_http(
             slug=slug,
             version=version,
             registry_url=registry_url,
             install_dir=install_dir,
-            api_token=api_token,
+            api_token=resolved_api_token,
         )
         return f"installed via http: {slug}"
 
     env = _build_env(
         registry_url=registry_url,
         workspace_dir=workspace_dir,
-        api_token=api_token,
+        api_token=resolved_api_token,
     )
 
     base_args = ["clawhub", "install", slug]
@@ -883,7 +897,7 @@ def install_skill(
         version=version,
         registry_url=registry_url,
         install_dir=install_dir,
-        api_token=api_token,
+        api_token=resolved_api_token,
     )
     return f"installed via http fallback: {slug} (cli_error={last_error})"
 
@@ -987,16 +1001,59 @@ def _resolve_clawhub_global_config_path() -> Path:
     return clawhub_path
 
 
+def _resolve_clawhub_global_config_paths() -> list[Path]:
+    override = os.environ.get("CLAWHUB_CONFIG_PATH", "").strip() or os.environ.get(
+        "CLAWDHUB_CONFIG_PATH", ""
+    ).strip()
+    if override:
+        return [Path(override).expanduser()]
+    home = Path.home()
+    system = platform.system()
+    if system == "Darwin":
+        base = home / "Library" / "Application Support"
+    elif system == "Windows":
+        app_data = os.environ.get("APPDATA", "").strip()
+        base = Path(app_data).expanduser() if app_data else home / "AppData" / "Roaming"
+    else:
+        xdg = os.environ.get("XDG_CONFIG_HOME", "").strip()
+        base = Path(xdg).expanduser() if xdg else home / ".config"
+    return [
+        base / "clawhub" / "config.json",
+        base / "clawdhub" / "config.json",
+    ]
+
+
 def _read_clawhub_global_config() -> dict[str, object]:
-    path = _resolve_clawhub_global_config_path()
-    if not path.is_file():
-        return {}
-    with contextlib.suppress(Exception):
-        raw = path.read_text(encoding="utf-8")
-        parsed = json.loads(raw)
-        if isinstance(parsed, dict):
-            return {str(k): v for k, v in parsed.items() if isinstance(k, str)}
-    return {}
+    merged: dict[str, object] = {}
+    for path in _resolve_clawhub_global_config_paths():
+        if not path.is_file():
+            continue
+        with contextlib.suppress(Exception):
+            raw = path.read_text(encoding="utf-8")
+            parsed = json.loads(raw)
+            if not isinstance(parsed, dict):
+                continue
+            parsed_map = {
+                str(key): value
+                for key, value in cast(dict[object, object], parsed).items()
+                if isinstance(key, str)
+            }
+            if path.parent.name == "clawdhub":
+                for key, value in parsed_map.items():
+                    if key not in merged or _is_empty_value(merged[key]):
+                        merged[key] = value
+            else:
+                merged.update(parsed_map)
+    return merged
+
+
+def _resolve_clawhub_api_token(api_token: str | None) -> str | None:
+    token = (api_token or "").strip()
+    if token:
+        return token
+    cfg = _read_clawhub_global_config()
+    fallback = str(cfg.get("token", "")).strip()
+    return fallback or None
 
 
 def _iter_publish_files(skill_dir: Path) -> list[tuple[str, bytes, str]]:
@@ -1082,8 +1139,9 @@ def _search_via_http(
 ) -> list[dict[str, object]]:
     base = registry_url.rstrip("/") + "/"
     headers: dict[str, str] = {"Accept": "application/json"}
-    if api_token:
-        headers["Authorization"] = f"Bearer {api_token}"
+    resolved_api_token = _resolve_clawhub_api_token(api_token)
+    if resolved_api_token:
+        headers["Authorization"] = f"Bearer {resolved_api_token}"
     with httpx.Client(timeout=12, follow_redirects=True) as client:
         resp = client.get(
             f"{base}api/v1/search",
@@ -1383,8 +1441,9 @@ def _install_via_http(
 ) -> None:
     base = registry_url.rstrip("/") + "/"
     headers: dict[str, str] = {}
-    if api_token:
-        headers["Authorization"] = f"Bearer {api_token}"
+    resolved_api_token = _resolve_clawhub_api_token(api_token)
+    if resolved_api_token:
+        headers["Authorization"] = f"Bearer {resolved_api_token}"
 
     with httpx.Client(timeout=25, follow_redirects=True) as client:
         params = {"slug": slug}
