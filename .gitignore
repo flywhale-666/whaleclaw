@@ -29,7 +29,8 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-# Node (if any)
+# Node (embedded runtime, same as python/)
+node/
 node_modules/
 
 # Env files
