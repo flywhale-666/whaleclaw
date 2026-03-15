@@ -58,7 +58,6 @@ class SkillManager:
     def get_routed_skills(
         self,
         user_message: str,
-        max_skills: int = 2,
         forced_skill_id: str | None = None,
         forced_skill_ids: list[str] | None = None,
     ) -> list[Skill]:
@@ -77,7 +76,7 @@ class SkillManager:
             forced_skill = next((s for s in available if s.id == forced_skill_id), None)
             if forced_skill is not None:
                 return [forced_skill]
-        return self._router.route(user_message, available, max_skills=max_skills)
+        return self._router.route(user_message, available)
 
     def format_for_prompt(self, skills: list[Skill], budget: int) -> str:
         """Format skills for prompt injection within token budget."""
@@ -92,10 +91,10 @@ class SkillManager:
                 block += "\n\n### 示例\n" + "\n".join(s.examples)
             return _truncate_to_tokens(block, cap)
 
-        half = budget // 2
+        share = budget // len(skills)
         parts: list[str] = []
         for s in skills:
-            cap = min(half, s.max_tokens)
+            cap = min(share, s.max_tokens)
             block = f"## 技能: {s.name}\n\n{s.instructions}"
             if s.examples and _estimate_tokens(block) < cap:
                 remaining = cap - _estimate_tokens(block)

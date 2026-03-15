@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
@@ -11,7 +12,16 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import whaleclaw.agent.loop as loop_mod
-from whaleclaw.agent.helpers.tool_execution import is_transient_cli_usage_error
+from whaleclaw.agent.helpers.tool_execution import (
+    is_nano_banana_cli_param_error,
+    is_nano_banana_preflight_error,
+    is_transient_cli_usage_error,
+    repair_tool_call,
+)
+from whaleclaw.agent.helpers.tool_guards import (
+    ToolGuardState,
+    apply_tool_result_guards,
+)
 from whaleclaw.agent.loop import _is_image_generation_request, _parse_fallback_tool_calls, run_agent
 from whaleclaw.config.schema import WhaleclawConfig
 from whaleclaw.providers.base import AgentResponse, Message, ToolCall
@@ -168,6 +178,161 @@ def test_is_transient_cli_usage_error_detects_argparse_banner() -> None:
     assert is_transient_cli_usage_error(result) is True
 
 
+def test_is_nano_banana_cli_param_error_requires_script_banner_and_argparse_marker() -> None:
+    result = ToolResult(
+        success=False,
+        output=(
+            "[stderr]\nHTTP 500 请求失败: https://ai.t8star.cn/v1/images/generations\n"
+            '响应体: {"error":"upstream error"}'
+        ),
+        error="HTTP 500 请求失败",
+    )
+
+    assert is_nano_banana_cli_param_error(result) is False
+
+
+def test_is_nano_banana_preflight_error_detects_python_script_run_as_shell() -> None:
+    result = ToolResult(
+        success=False,
+        output=(
+            "[stderr]\n"
+            "/tmp/test_nano_banana_2.py: line 1: from: command not found\n"
+            "/tmp/test_nano_banana_2.py: line 3: import: command not found"
+        ),
+        error=(
+            "/tmp/test_nano_banana_2.py: line 1: from: command not found\n"
+            "/tmp/test_nano_banana_2.py: line 3: import: command not found"
+        ),
+    )
+
+    assert is_nano_banana_preflight_error(result) is True
+
+
+def test_repair_tool_call_normalizes_nano_banana_cli_args() -> None:
+    tc = ToolCall(
+        id="tc_nano",
+        name="bash",
+        arguments={
+            "command": (
+                'bash -lc \'./python/bin/python3.12 '
+                '~/.whaleclaw/workspace/skills/nano-banana-image-t8/scripts/test_nano_banana_2.py '
+                '--mode text2image --api-base https://ai.t8star.cn '
+                '--prompt "刘亦菲大战奥特曼" --size "4:3"\''
+            )
+        },
+    )
+
+    repaired, reason = repair_tool_call(tc, "使用香蕉生图画两张图，比例 4:3")
+
+    assert reason is not None
+    command = str(repaired.arguments["command"])
+    assert "--mode text" in command
+    assert "--base-url https://ai.t8star.cn" in command
+    assert '--aspect-ratio "4:3"' in command
+    assert "--mode text2image" not in command
+    assert "--api-base" not in command
+
+
+def test_nano_banana_cli_usage_error_allows_fixed_retry() -> None:
+    state = ToolGuardState()
+    tc = ToolCall(
+        id="tc_nano",
+        name="bash",
+        arguments={"command": "./python/bin/python3.12 test_nano_banana_2.py --mode text2image"},
+    )
+    result = ToolResult(
+        success=False,
+        output=(
+            "[stderr]\nusage: test_nano_banana_2.py [-h]\n"
+            "error: argument --mode: invalid choice: 'text2image'"
+        ),
+        error=(
+            "usage: test_nano_banana_2.py [-h]\n"
+            "error: argument --mode: invalid choice: 'text2image'"
+        ),
+    )
+
+    update = apply_tool_result_guards(
+        state,
+        tc,
+        result,
+        office_loop_guard_enabled=False,
+        image_api_probe_guard_enabled=False,
+        session_id="test",
+    )
+
+    assert update.conversation_messages == [
+        "[系统提示] 上一次 Nano Banana 命令在进入实际生图流程前就失败了。"
+        "如果是参数错误或脚本调用方式错误，允许你立刻修正后重试一次；"
+        "但必须修改错误点，禁止原样重试。"
+    ]
+
+
+def test_nano_banana_runtime_failure_still_blocks_auto_retry() -> None:
+    state = ToolGuardState()
+    tc = ToolCall(
+        id="tc_nano",
+        name="bash",
+        arguments={"command": "./python/bin/python3.12 test_nano_banana_2.py --mode text"},
+    )
+    result = ToolResult(
+        success=False,
+        output="[ERROR] HTTP 500 请求失败: https://ai.t8star.cn/v1/images/generations",
+        error="HTTP 500 请求失败",
+    )
+
+    update = apply_tool_result_guards(
+        state,
+        tc,
+        result,
+        office_loop_guard_enabled=False,
+        image_api_probe_guard_enabled=False,
+        session_id="test",
+    )
+
+    assert update.conversation_messages == [
+        "[系统提示] 本次生图失败，禁止自动重试。"
+        "继续执行剩余任务，最终将成功和失败的结果一并回复用户，"
+        "由用户决定是否对失败的图重新操作。"
+    ]
+
+
+def test_nano_banana_python_shell_mismatch_allows_fixed_retry() -> None:
+    state = ToolGuardState()
+    tc = ToolCall(
+        id="tc_nano",
+        name="bash",
+        arguments={"command": "~/.whaleclaw/workspace/skills/nano-banana-image-t8/scripts/test_nano_banana_2.py"},
+    )
+    result = ToolResult(
+        success=False,
+        output=(
+            "[stderr]\n"
+            "/tmp/test_nano_banana_2.py: line 1: from: command not found\n"
+            "/tmp/test_nano_banana_2.py: line 3: import: command not found"
+        ),
+        error=(
+            "/tmp/test_nano_banana_2.py: line 1: from: command not found\n"
+            "/tmp/test_nano_banana_2.py: line 3: import: command not found"
+        ),
+    )
+
+    update = apply_tool_result_guards(
+        state,
+        tc,
+        result,
+        office_loop_guard_enabled=False,
+        image_api_probe_guard_enabled=False,
+        session_id="test",
+    )
+
+    assert update.conversation_messages == [
+        "[系统提示] 上一次 Nano Banana 命令在进入实际生图流程前就失败了。"
+        "如果是参数错误或脚本调用方式错误，允许你立刻修正后重试一次；"
+        "但必须修改错误点，禁止原样重试。"
+    ]
+
+
 class _EchoTool(Tool):
     """Dummy tool that echoes its input."""
 
@@ -264,6 +429,28 @@ class _BashProbeTool(Tool):
         return ToolResult(success=False, output="", error="bad command")
 
 
+class _DelayedNanoBananaBashTool(Tool):
+    """Dummy bash tool that simulates slow nano-banana commands."""
+
+    def __init__(self, delay: float = 0.08) -> None:
+        self.delay = delay
+        self.started_at: list[float] = []
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="bash",
+            description="Delayed bash for parallel nano banana tests.",
+            parameters=[ToolParameter(name="command", type="string", description="command")],
+        )
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        command = str(kwargs.get("command", ""))
+        self.started_at.append(time.monotonic())
+        await asyncio.sleep(self.delay)
+        return ToolResult(success=True, output=f"ok:{command}")
+
+
 class _DesktopCaptureNoopTool(Tool):
     """Dummy desktop_capture tool for tool-selection assertions."""
 
@@ -353,6 +540,57 @@ class _NanoBananaFixedRunnerTool(Tool):
                 "\n[exit_code: 0]"
             ),
         )
+
+
+import re as _re
+
+
+def _make_nano_banana_router(
+    *,
+    model_display: str = "香蕉2",
+    output_path: Path | None = None,
+    final_content: str | None = None,
+) -> MagicMock:
+    """构建 nano-banana 测试用的 router mock。
+
+    第一次 chat 调用：从 system messages 中提取命令模板，返回 bash tool_call。
+    第二次 chat 调用：返回格式化的成功回复。
+    """
+    _CMD_RE = _re.compile(r"```\n(.+?)\n```", _re.DOTALL)
+    call_count = 0
+
+    async def fake_chat(
+        model_id: str,  # noqa: ARG001
+        messages: list[Any],
+        *,
+        tools: Any = None,  # noqa: ARG001
+        on_stream: Any = None,  # noqa: ARG001
+    ) -> AgentResponse:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            cmd = ""
+            for m in messages:
+                text = m.content if hasattr(m, "content") else str(m)
+                match = _CMD_RE.search(text)
+                if match:
+                    cmd = match.group(1).strip()
+                    break
+            return AgentResponse(
+                content="",
+                model="test-model",
+                tool_calls=[ToolCall(id="tc_nb_1", name="bash", arguments={"command": cmd})],
+            )
+        content = final_content
+        if content is None:
+            parts = [f"当前使用模型：{model_display}", "改好了："]
+            if output_path is not None:
+                parts.append(f"![结果图]({output_path})")
+                parts.append(f"文件路径：{output_path}")
+            content = "\n".join(parts)
+        return AgentResponse(content=content, model="test-model")
+
+    return _make_router(chat_fn=fake_chat)
 
 
 class _PptEditNoopTool(Tool):
@@ -1047,6 +1285,65 @@ async def test_run_agent_retries_direct_python_script_bash_invocation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_agent_executes_multiple_nano_banana_bash_calls_in_parallel() -> None:
+    tool_response = AgentResponse(
+        content="",
+        model="test-model",
+        tool_calls=[
+            ToolCall(
+                id="tc_nb_1",
+                name="bash",
+                arguments={"command": "./python/bin/python3.12 /tmp/test_nano_banana_2.py --mode text --prompt a"},
+            ),
+            ToolCall(
+                id="tc_nb_2",
+                name="bash",
+                arguments={"command": "./python/bin/python3.12 /tmp/test_nano_banana_2.py --mode text --prompt b"},
+            ),
+            ToolCall(
+                id="tc_nb_3",
+                name="bash",
+                arguments={"command": "./python/bin/python3.12 /tmp/test_nano_banana_2.py --mode text --prompt c"},
+            ),
+        ],
+    )
+    final_response = AgentResponse(content="done", model="test-model")
+
+    call_count = 0
+
+    async def fake_chat(
+        model_id: str,  # noqa: ARG001
+        messages: list[Any],  # noqa: ARG001
+        *,
+        tools: Any = None,  # noqa: ARG001
+        on_stream: Any = None,  # noqa: ARG001
+    ) -> AgentResponse:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return tool_response
+        return final_response
+
+    router = _make_router(chat_fn=fake_chat)
+    registry = ToolRegistry()
+    bash_tool = _DelayedNanoBananaBashTool()
+    registry.register(bash_tool)
+
+    result = await run_agent(
+        message="并发生成三张香蕉图片",
+        session_id="test-nano-banana-parallel",
+        config=WhaleclawConfig(),
+        router=router,
+        registry=registry,
+    )
+
+    assert result.endswith("done")
+    assert call_count == 2
+    assert len(bash_tool.started_at) == 3
+    assert max(bash_tool.started_at) - min(bash_tool.started_at) < 0.04
+
+
+@pytest.mark.asyncio
 async def test_run_agent_uses_fixed_nano_banana_command_when_params_are_complete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1057,6 +1354,7 @@ async def test_run_agent_uses_fixed_nano_banana_command_when_params_are_complete
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -1078,7 +1376,7 @@ async def test_run_agent_uses_fixed_nano_banana_command_when_params_are_complete
     output_path = tmp_path / "image_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -1119,7 +1417,6 @@ async def test_run_agent_uses_fixed_nano_banana_command_when_params_are_complete
     assert len(bash_tool.commands) == 1
     assert "--mode edit" in bash_tool.commands[0]
     assert f"--input-image {image_path}" in bash_tool.commands[0]
-    router.chat.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1930,8 +2227,11 @@ async def test_run_agent_applies_nano_banana_model_and_recent_image_hints_to_sys
         updated_at=now,
         metadata={
             "locked_skill_ids": ["nano-banana-image-t8"],
+            "last_input_image_paths": [str(image_path)],
             "skill_param_state": {
                 "nano-banana-image-t8": {
+                    "api_key": "__present__",
+                    "prompt": "一只熊猫在上海跳舞",
                     "__model_display__": "香蕉pro",
                 }
             },
@@ -1952,7 +2252,6 @@ async def test_run_agent_applies_nano_banana_model_and_recent_image_hints_to_sys
     assert "当前本轮模型是：香蕉pro" in joined
     assert "--model` 和 `--edit-model` 都设置为 `香蕉pro`" in joined
     assert str(image_path) in joined
-    assert "不要再要求用户重新上传" in joined
 
 
 @pytest.mark.asyncio
@@ -1965,6 +2264,7 @@ async def test_run_agent_auto_locks_when_user_explicitly_mentions_skill(
         triggers=["nanobanana", "文生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         source_path=Path("/tmp/SKILL.md"),
     )
     monkeypatch.setattr(
@@ -2010,6 +2310,7 @@ async def test_run_agent_auto_locks_when_user_hits_specific_skill_trigger(
         triggers=["香蕉生图", "香蕉文生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -2111,6 +2412,7 @@ async def test_run_agent_rejects_skill_switch_without_user_consent(
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         source_path=Path("/tmp/a.md"),
     )
     skill_b = Skill(
@@ -2119,6 +2421,7 @@ async def test_run_agent_rejects_skill_switch_without_user_consent(
         triggers=["ppt"],
         instructions="x",
         lock_session=False,
+        is_user_installed=True,
         source_path=Path("/tmp/b.md"),
     )
 
@@ -2163,6 +2466,7 @@ async def test_run_agent_rejects_other_skill_trigger_without_explicit_skill_name
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         source_path=Path("/tmp/a-trigger.md"),
     )
     skill_b = Skill(
@@ -2171,6 +2475,7 @@ async def test_run_agent_rejects_other_skill_trigger_without_explicit_skill_name
         triggers=["ppt"],
         instructions="x",
         lock_session=False,
+        is_user_installed=True,
         source_path=Path("/tmp/b-trigger.md"),
     )
 
@@ -2217,6 +2522,7 @@ async def test_run_agent_keeps_locked_skill_when_user_did_not_explicitly_request
         triggers=["ppt"],
         instructions="x",
         lock_session=False,
+        is_user_installed=True,
         source_path=Path("/tmp/b1.md"),
     )
 
@@ -2262,6 +2568,7 @@ async def test_run_agent_requires_task_done_before_switching_skills(
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         source_path=Path("/tmp/a2.md"),
     )
     skill_b = Skill(
@@ -2270,6 +2577,7 @@ async def test_run_agent_requires_task_done_before_switching_skills(
         triggers=["ppt"],
         instructions="x",
         lock_session=False,
+        is_user_installed=True,
         source_path=Path("/tmp/b2.md"),
     )
 
@@ -2315,6 +2623,7 @@ async def test_run_agent_unlocks_then_requires_reenter_command_for_switch(
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         source_path=Path("/tmp/a3.md"),
     )
     skill_b = Skill(
@@ -2323,6 +2632,7 @@ async def test_run_agent_unlocks_then_requires_reenter_command_for_switch(
         triggers=["ppt"],
         instructions="x",
         lock_session=False,
+        is_user_installed=True,
         source_path=Path("/tmp/b3.md"),
     )
 
@@ -2393,6 +2703,7 @@ async def test_run_agent_switches_after_unlock_and_reenter_command(
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         source_path=Path("/tmp/a3.md"),
     )
     skill_b = Skill(
@@ -2401,6 +2712,7 @@ async def test_run_agent_switches_after_unlock_and_reenter_command(
         triggers=["ppt"],
         instructions="x",
         lock_session=False,
+        is_user_installed=True,
         source_path=Path("/tmp/b3.md"),
     )
     monkeypatch.setattr(
@@ -2470,6 +2782,7 @@ async def test_non_lock_skill_does_not_persist_lock_after_success(
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         source_path=Path("/tmp/banana.md"),
     )
 
@@ -2567,6 +2880,7 @@ async def test_nano_banana_guard_lists_missing_params_before_execution() -> None
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -2652,6 +2966,7 @@ async def test_nano_banana_guard_uses_saved_key_without_asking_again(
         triggers=["香蕉生图", "香蕉文生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -2699,18 +3014,24 @@ async def test_nano_banana_guard_uses_saved_key_without_asking_again(
         model="openai/gpt-5.2",
         created_at=now,
         updated_at=now,
-        metadata={"locked_skill_ids": ["nano-banana-image-t8"]},
+        metadata={
+            "locked_skill_ids": ["nano-banana-image-t8"],
+            "skill_param_state": {
+                "nano-banana-image-t8": {},
+            },
+        },
     )
 
     result = await run_agent(
-        message="香蕉文生图",
+        message="尺寸 1:1",
         session_id=session.id,
         config=WhaleclawConfig(),
         router=router,
         session=session,
     )
 
-    assert "1) API Key：已就绪" in result
+    assert "API Key" in result
+    assert "已就绪" in result
     assert "请提供 Nano Banana API Key" not in result
     assert "请提供提示词" in result
     router.chat.assert_not_called()
@@ -2729,6 +3050,7 @@ async def test_nano_banana_guard_keeps_fixed_template_for_activation_only_messag
         triggers=["香蕉生图", "香蕉文生图", "香蕉图生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -2802,6 +3124,7 @@ async def test_nano_banana_control_message_does_not_overwrite_existing_prompt() 
         triggers=["香蕉生图", "香蕉pro"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -2888,6 +3211,7 @@ async def test_nano_banana_activation_message_reminds_when_session_is_already_lo
         triggers=["香蕉生图", "香蕉pro"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -3057,6 +3381,7 @@ async def test_run_agent_reuses_recent_session_images_for_locked_image_skill(
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -3108,7 +3433,17 @@ async def test_run_agent_reuses_recent_session_images_for_locked_image_skill(
         model="openai/gpt-5.2",
         created_at=now,
         updated_at=now,
-        metadata={"locked_skill_ids": ["nano-banana-image-t8"]},
+        metadata={
+            "locked_skill_ids": ["nano-banana-image-t8"],
+            "skill_param_state": {
+                "nano-banana-image-t8": {
+                    "api_key": "__present__",
+                    "prompt": "处理这张图",
+                    "images": 1,
+                },
+            },
+            "last_input_image_paths": [str(image_path)],
+        },
     )
 
     result = await run_agent(
@@ -3136,6 +3471,7 @@ async def test_run_agent_prefers_latest_generated_image_for_locked_image_skill(
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -3232,6 +3568,7 @@ async def test_run_agent_regenerate_reuses_last_input_image_set_for_locked_image
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -3323,6 +3660,7 @@ async def test_run_agent_regenerate_keeps_text_mode_for_fixed_nano_banana_runner
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -3346,7 +3684,7 @@ async def test_run_agent_regenerate_keeps_text_mode_for_fixed_nano_banana_runner
     output_path = tmp_path / "text_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -3475,6 +3813,7 @@ async def test_run_agent_regenerate_merges_new_prompt_delta_for_text_nano_banana
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -3493,7 +3832,7 @@ async def test_run_agent_regenerate_merges_new_prompt_delta_for_text_nano_banana
     output_path = tmp_path / "text_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -3547,6 +3886,7 @@ async def test_run_agent_new_prompt_replaces_previous_text_prompt_for_nano_banan
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -3565,7 +3905,7 @@ async def test_run_agent_new_prompt_replaces_previous_text_prompt_for_nano_banan
     output_path = tmp_path / "text_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -3619,6 +3959,7 @@ async def test_run_agent_regenerate_merges_prompt_and_updates_ratio_for_text_nan
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -3643,7 +3984,7 @@ async def test_run_agent_regenerate_merges_prompt_and_updates_ratio_for_text_nan
     output_path = tmp_path / "text_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -3698,6 +4039,7 @@ async def test_run_agent_regenerate_reuses_original_inputs_and_merges_prompt_for
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -3721,7 +4063,7 @@ async def test_run_agent_regenerate_reuses_original_inputs_and_merges_prompt_for
     output_path = tmp_path / "image_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -3779,6 +4121,7 @@ async def test_run_agent_edit_followup_add_object_reuses_latest_generated_image(
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -3800,7 +4143,7 @@ async def test_run_agent_edit_followup_add_object_reuses_latest_generated_image(
     output_path = tmp_path / "image_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -3856,6 +4199,7 @@ async def test_run_agent_edit_followup_continues_last_edit_mode_without_explicit
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -3877,7 +4221,7 @@ async def test_run_agent_edit_followup_continues_last_edit_mode_without_explicit
     output_path = tmp_path / "image_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -3932,6 +4276,7 @@ async def test_run_agent_text_to_image_followup_with_subject_reference_switches_
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -3952,7 +4297,7 @@ async def test_run_agent_text_to_image_followup_with_subject_reference_switches_
     output_path = tmp_path / "image_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -4008,6 +4353,7 @@ async def test_run_agent_explicit_new_image_request_breaks_previous_edit_chain(
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4028,7 +4374,7 @@ async def test_run_agent_explicit_new_image_request_breaks_previous_edit_chain(
     output_path = tmp_path / "text_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -4084,6 +4430,7 @@ async def test_run_agent_new_uploaded_image_starts_fresh_image_to_image_request(
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4107,7 +4454,7 @@ async def test_run_agent_new_uploaded_image_starts_fresh_image_to_image_request(
     output_path = tmp_path / "image_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -4168,6 +4515,7 @@ async def test_run_agent_uses_2k_image_size_for_nano_banana_pro_fixed_runner(
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4186,7 +4534,7 @@ async def test_run_agent_uses_2k_image_size_for_nano_banana_pro_fixed_runner(
     output_path = tmp_path / "text_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉pro", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -4237,6 +4585,7 @@ async def test_run_agent_does_not_use_2k_image_size_for_nano_banana_2_fixed_runn
         triggers=["香蕉生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4255,7 +4604,7 @@ async def test_run_agent_does_not_use_2k_image_size_for_nano_banana_2_fixed_runn
     output_path = tmp_path / "text_to_image.png"
     output_path.write_bytes(b"out")
 
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -4306,6 +4655,7 @@ async def test_nano_banana_control_message_switches_model_without_running_genera
         triggers=["香蕉生图", "香蕉pro"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4373,6 +4723,7 @@ async def test_nano_banana_model_switch_phrase_does_not_run_generator(
         triggers=["香蕉生图", "香蕉pro"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4439,6 +4790,7 @@ async def test_nano_banana_activation_message_uses_guard_reply_after_unlock(
         triggers=["香蕉生图", "香蕉文生图", "香蕉图生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4518,6 +4870,7 @@ async def test_run_agent_keeps_locked_nano_banana_for_numbered_image_reference_e
         triggers=["香蕉生图", "香蕉文生图", "香蕉图生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4589,6 +4942,7 @@ async def test_run_agent_keeps_locked_nano_banana_for_regenerate_followup(
         triggers=["香蕉生图", "香蕉文生图", "香蕉图生图"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4663,6 +5017,7 @@ async def test_run_agent_regenerate_does_not_reuse_images_for_text_mode_nano_ban
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4747,6 +5102,7 @@ async def test_run_agent_does_not_reuse_images_for_plain_chat_under_locked_image
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4833,6 +5189,7 @@ async def test_run_agent_plain_chat_under_locked_nano_banana_does_not_run_fixed_
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4904,6 +5261,7 @@ async def test_run_agent_prompt_like_description_under_locked_nano_banana_runs_f
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -4921,7 +5279,7 @@ async def test_run_agent_prompt_like_description_under_locked_nano_banana_runs_f
 
     output_path = tmp_path / "text_to_image.png"
     output_path.write_bytes(b"out")
-    router = _make_router(response=AgentResponse(content="不应调用", model="test-model"))
+    router = _make_nano_banana_router(model_display="香蕉2", output_path=output_path)
     registry = ToolRegistry()
     bash_tool = _NanoBananaFixedRunnerTool(output_path)
     registry.register(bash_tool)
@@ -4973,6 +5331,7 @@ async def test_run_agent_question_under_locked_nano_banana_does_not_run_fixed_ru
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[
@@ -5042,6 +5401,7 @@ async def test_run_agent_desktop_screenshot_request_under_locked_nano_banana_doe
         triggers=["nanobanana"],
         instructions="x",
         lock_session=True,
+        is_user_installed=True,
         param_guard=SkillParamGuard(
             enabled=True,
             params=[

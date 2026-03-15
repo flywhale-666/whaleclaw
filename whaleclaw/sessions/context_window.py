@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from whaleclaw.providers.base import Message
+from whaleclaw.providers.base import Message, repair_tool_call_pairs as _repair_tool_call_pairs
 
 if TYPE_CHECKING:
     from whaleclaw.sessions.store import SummaryRow
@@ -75,6 +75,87 @@ def _clip_tokens(text: str, max_tokens: int) -> str:
     return text[:char_cap].rstrip() + " ..."
 
 
+import re as _re
+
+_ONELINE_CAP = 120
+_EXIT_CODE_RE = _re.compile(r"\[exit_code:\s*(\d+)\]")
+_TOOL_NAME_RE = _re.compile(r"^\[工具\s+(\S+)\s+执行结果\]")
+_FINAL_ERROR_RE = _re.compile(
+    r"^(\w+(?:\.\w+)*(?:Error|Exception|Warning|Fault|Interrupt|Exit)[^\n]*)",
+    _re.MULTILINE,
+)
+_DIAGNOSIS_RE = _re.compile(r"\[DIAGNOSIS\]\s*(.*)")
+
+
+def _is_tool_message(msg: Message) -> bool:
+    return msg.role == "tool" or (
+        msg.role == "user" and msg.content.startswith("[工具 ")
+    )
+
+
+def _extract_tool_name(msg: Message) -> str:
+    """从非 native 格式 '[工具 bash 执行结果]' 中提取工具名。"""
+    m = _TOOL_NAME_RE.match(msg.content)
+    return m.group(1) if m else ""
+
+
+def _first_meaningful_line(text: str, *, skip_prefix: str = "") -> str:
+    """取第一行有意义的内容，跳过空行和指定前缀行。"""
+    for ln in text.splitlines():
+        ln = ln.strip()
+        if not ln:
+            continue
+        if skip_prefix and ln.startswith(skip_prefix):
+            continue
+        return ln[:100]
+    return text[:100]
+
+
+def _oneline_success(text: str) -> str:
+    """成功输出 → 一行摘要。"""
+    exit_m = _EXIT_CODE_RE.search(text)
+    exit_info = f" exit:{exit_m.group(1)}" if exit_m else ""
+
+    first = _first_meaningful_line(text, skip_prefix="[工具 ")
+    total_lines = text.count("\n") + 1
+    if total_lines > 3:
+        return f"✓ {first}{exit_info} ({total_lines}行)"
+    return f"✓ {first}{exit_info}"
+
+
+def _oneline_error(text: str) -> str:
+    """失败输出 → 一行摘要：提取错误类型。"""
+    # 优先取 Python 异常类型行
+    err_m = _FINAL_ERROR_RE.search(text)
+    if err_m:
+        err_line = err_m.group(1).strip()[:100]
+    else:
+        err_line = _first_meaningful_line(text, skip_prefix="[工具 ")
+
+    diag_m = _DIAGNOSIS_RE.search(text)
+    diag = f" | {diag_m.group(1).strip()[:60]}" if diag_m else ""
+    return f"✗ {err_line}{diag}"
+
+
+def _cap_tool_content(msg: Message) -> Message:
+    """将历史轮的 tool 消息压缩为一行摘要（~20 tokens）。
+
+    仅用于历史轮，当轮消息不应调用此函数。
+    """
+    if not _is_tool_message(msg):
+        return msg
+    text = msg.content
+
+    # 短消息（<= 120 字符）不压缩
+    if len(text) <= _ONELINE_CAP:
+        return msg
+
+    is_error = "[ERROR]" in text
+    summary = _oneline_error(text) if is_error else _oneline_success(text)
+    summary = summary[:_ONELINE_CAP]
+    return Message(role=msg.role, content=summary, tool_call_id=msg.tool_call_id)
+
+
 def _compress_l1(msg: Message) -> Message:
     text = msg.content.strip()
     if _estimate_tokens(text) <= 120:
@@ -94,7 +175,12 @@ def _compress_l1(msg: Message) -> Message:
         kept = [text[:240]]
 
     body = "\n".join(kept)
-    return Message(role=msg.role, content=f"[L1压缩] {body} ...")
+    return Message(
+        role=msg.role,
+        content=f"[L1压缩] {body} ...",
+        tool_call_id=msg.tool_call_id,
+        tool_calls=msg.tool_calls,
+    )
 
 
 def _compress_l0(msg: Message) -> Message:
@@ -112,7 +198,12 @@ def _compress_l0(msg: Message) -> Message:
             break
 
     body = first if not hints else first + " | " + " ; ".join(hints)
-    return Message(role=msg.role, content=f"[L0压缩] {body} ...")
+    return Message(
+        role=msg.role,
+        content=f"[L0压缩] {body} ...",
+        tool_call_id=msg.tool_call_id,
+        tool_calls=msg.tool_calls,
+    )
 
 
 def _build_summary_message(summaries: list[SummaryRow], budget: int) -> str:
@@ -227,6 +318,10 @@ def _keep_recent_groups_with_budget(
     for group in reversed(recent_groups):
         cost = _total_tokens(group)
         if used + cost > budget:
+            # 至少保留最后一组（包含当前 user 消息），否则 LLM 收不到用户输入
+            if not kept_rev:
+                kept_rev.append(group)
+                used += cost
             break
         kept_rev.append(group)
         used += cost
@@ -289,6 +384,11 @@ class ContextWindow:
         middle_c_groups = [_compress_group(g, level="L1") for g in middle_groups]
         core_groups = [*old_c_groups, *middle_c_groups]
 
+        # 对 recent 组中除最后一组外的 tool 消息做截断——
+        # 最后一组是当前轮，LLM 需要完整工具输出做后续判断。
+        for gi in range(len(recent_groups) - 1):
+            recent_groups[gi] = [_cap_tool_content(m) for m in recent_groups[gi]]
+
         recent_kept_groups, recent_dropped_groups = _keep_recent_groups_with_budget(
             recent_groups, non_budget
         )
@@ -334,5 +434,7 @@ class ContextWindow:
                 trimmed.pop(1)
                 continue
             trimmed.pop(0)
+
+        trimmed = _repair_tool_call_pairs(trimmed)
 
         return [*system, *trimmed]

@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from whaleclaw.providers.base import AgentResponse, Message, ToolCall, ToolSchema
+from whaleclaw.providers.base import AgentResponse, Message, ToolCall, ToolSchema, repair_tool_call_pairs
 from whaleclaw.providers.openai_compat import OpenAICompatProvider
 from whaleclaw.types import ProviderAuthError, ProviderError, ProviderRateLimitError, StreamCallback
 from whaleclaw.utils.log import get_logger
@@ -149,16 +149,66 @@ class OpenAIProvider(OpenAICompatProvider):
                 })
         return items
 
+    @staticmethod
+    def _repair_responses_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Responses API dict 层面的二次保险：移除孤儿 function_call / function_call_output。"""
+        call_ids: set[str] = set()
+        output_ids: set[str] = set()
+        for item in items:
+            itype = item.get("type", "")
+            if itype == "function_call":
+                cid = item.get("call_id", "")
+                if cid:
+                    call_ids.add(cid)
+            elif itype == "function_call_output":
+                cid = item.get("call_id", "")
+                if cid:
+                    output_ids.add(cid)
+
+        orphan_calls = call_ids - output_ids
+        orphan_outputs = output_ids - call_ids
+        if not orphan_calls and not orphan_outputs:
+            return items
+
+        log.warning(
+            "openai.repair_responses_items",
+            orphan_calls=len(orphan_calls),
+            orphan_outputs=len(orphan_outputs),
+        )
+        return [
+            item for item in items
+            if not (
+                (item.get("type") == "function_call" and item.get("call_id", "") in orphan_calls)
+                or (item.get("type") == "function_call_output" and item.get("call_id", "") in orphan_outputs)
+            )
+        ]
+
     def _build_responses_body(
         self,
         messages: list[Message],
         model: str,
         tools: list[ToolSchema] | None,
     ) -> dict[str, Any]:
+        messages = repair_tool_call_pairs(messages)
         include_system = self._auth_mode != "oauth"
+        input_items = self._build_responses_input(messages, include_system=include_system)
+        input_items = self._repair_responses_items(input_items)
+
+        # OAuth 模式下 system/developer 消息被移到 instructions 字段，
+        # 如果 context window 裁剪过于激进导致 input 为空，
+        # 至少保留最后一条 user 消息，否则 Responses API 会报 400。
+        if not input_items:
+            for m in reversed(messages):
+                if m.role == "user":
+                    input_items = self._build_responses_input([m], include_system=False)
+                    break
+            if not input_items:
+                input_items = [{"role": "user", "type": "message",
+                                "content": [{"type": "input_text", "text": "..."}]}]
+
         body: dict[str, Any] = {
             "model": model,
-            "input": self._build_responses_input(messages, include_system=include_system),
+            "input": input_items,
             "stream": True,
         }
         if tools:

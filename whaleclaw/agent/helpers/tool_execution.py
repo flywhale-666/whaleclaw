@@ -38,6 +38,13 @@ _PY_SHELL_MISMATCH_HINTS = (
     "from: command not found",
     "import: command not found",
 )
+_NANO_BANANA_SCRIPT_HINT = "test_nano_banana"
+_NANO_BANANA_MODE_REWRITES = {
+    "text2image": "text",
+    "txt2img": "text",
+    "image2image": "edit",
+    "img2img": "edit",
+}
 
 
 def create_default_registry(
@@ -399,14 +406,15 @@ def _summarize_error(text: str) -> str:
 
 
 def format_tool_output(result: ToolResult) -> str:
+    """格式化工具输出，当轮保持完整不压缩。
+
+    压缩/截断统一由 ContextWindow 在消息进入历史时处理。
+    """
     if result.success:
         return result.output or "(empty output)"
     error_part = result.error or "unknown error"
     output_part = result.output or ""
     raw = f"[ERROR] {error_part}\n{output_part}".strip()
-    raw = _summarize_error(raw)
-    if len(raw) > _ERROR_SUMMARY_MAX_CHARS:
-        raw = raw[:_ERROR_SUMMARY_MAX_CHARS] + " ..."
     diagnosis = diagnose_failure_hint(result)
     if diagnosis:
         raw += f"\n[DIAGNOSIS] {diagnosis}"
@@ -419,6 +427,27 @@ def is_transient_cli_usage_error(result: ToolResult) -> bool:
         return False
     text = f"{result.error or ''}\n{result.output or ''}".lower()
     return "usage:" in text and "error:" in text and "--help" not in text
+
+
+def is_nano_banana_cli_param_error(result: ToolResult) -> bool:
+    """Return whether Nano Banana failed before execution due to bad CLI args."""
+    if not is_transient_cli_usage_error(result):
+        return False
+    text = f"{result.error or ''}\n{result.output or ''}".lower()
+    if "usage: test_nano_banana_2.py" not in text:
+        return False
+    param_error_markers = (
+        "invalid choice",
+        "unrecognized arguments",
+        "the following arguments are required",
+        "argument --",
+    )
+    return any(marker in text for marker in param_error_markers)
+
+
+def is_nano_banana_preflight_error(result: ToolResult) -> bool:
+    """Return whether Nano Banana failed before the real image flow started."""
+    return is_nano_banana_cli_param_error(result) or _is_python_shell_mismatch(result)
 
 
 def diagnose_failure_hint(result: ToolResult) -> str:
@@ -550,6 +579,34 @@ def is_garbled_query(text: str) -> bool:
     return bool(len(stripped) > 40 and len(set(stripped)) < 10)
 
 
+def _repair_nano_banana_bash_command(command: str) -> tuple[str, bool]:
+    """Normalize common LLM mistakes for Nano Banana CLI invocations."""
+    if _NANO_BANANA_SCRIPT_HINT not in command:
+        return command, False
+
+    repaired = command
+
+    for wrong_mode, right_mode in _NANO_BANANA_MODE_REWRITES.items():
+        repaired = re.sub(
+            rf"(--mode\s+)(['\"]?){re.escape(wrong_mode)}\2",
+            rf"\1\2{right_mode}\2",
+            repaired,
+            flags=re.IGNORECASE,
+        )
+
+    repaired = re.sub(r"(?<!\S)--api-base(?!\S)", "--base-url", repaired)
+
+    if "--aspect-ratio" not in repaired:
+        repaired = re.sub(
+            r"(--size\s+)(['\"]?)(\d{1,2}:\d{1,2})\2",
+            r"--aspect-ratio \2\3\2",
+            repaired,
+            flags=re.IGNORECASE,
+        )
+
+    return repaired, repaired != command
+
+
 def repair_tool_call(tc: ToolCall, user_message: str) -> tuple[ToolCall, str | None]:
     args: dict[str, object] = dict(tc.arguments)
     changed = False
@@ -576,6 +633,15 @@ def repair_tool_call(tc: ToolCall, user_message: str) -> tuple[ToolCall, str | N
         args[canonical] = value
         changed = True
         reasons.append(f"{canonical}<-alias")
+
+    if tc.name == "bash" and is_non_empty_str(args.get("command")):
+        repaired_command, command_changed = _repair_nano_banana_bash_command(
+            str(args.get("command", ""))
+        )
+        if command_changed:
+            args["command"] = repaired_command
+            changed = True
+            reasons.append("command<-nano-banana-cli")
 
     if tc.name == "browser":
         action = str(args.get("action", "")).strip().lower()
@@ -629,6 +695,8 @@ __all__ = [
     "execute_tool",
     "first_non_empty_arg",
     "format_tool_output",
+    "is_nano_banana_cli_param_error",
+    "is_nano_banana_preflight_error",
     "is_transient_cli_usage_error",
     "is_non_empty_str",
     "parse_fallback_tool_calls",

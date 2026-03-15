@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -114,3 +115,71 @@ def test_prefer_project_python_rewrites_env_prefixed_direct_python_script(
     assert rewritten == (
         f"NANO_BANANA_API_KEY='x' {fake_python} /tmp/test_nano_banana_2.py --mode edit"
     )
+
+
+def test_rewrite_nano_banana_batches_normalizes_direct_script_line(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_python = tmp_path / "python3.12"
+    fake_python.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(bash_mod, "_PROJECT_PYTHON", fake_python)
+
+    command = "\n".join(
+        [
+            "echo before",
+            "/tmp/test_nano_banana_2.py --mode text --prompt 'a'",
+            "echo after",
+        ]
+    )
+
+    rewritten = bash_mod._rewrite_nano_banana_batches(command)
+
+    assert f"{fake_python} /tmp/test_nano_banana_2.py --mode text --prompt 'a'" in rewritten
+    assert "echo before" in rewritten
+    assert "echo after" in rewritten
+
+
+def test_rewrite_nano_banana_batches_splits_into_parallel_chunks_of_five() -> None:
+    lines = [
+        f"./python/bin/python3.12 /tmp/test_nano_banana_{i}.py --mode text --prompt '{i}'"
+        for i in range(7)
+    ]
+    rewritten = bash_mod._rewrite_nano_banana_batches("\n".join(lines))
+
+    assert rewritten.count('__wc_nb_pids=""') == 2
+    assert rewritten.count("( ./python/bin/python3.12 /tmp/test_nano_banana_") == 7
+    assert "sleep 1.5" in rewritten
+
+
+@pytest.mark.asyncio
+async def test_nano_banana_script_uses_300_second_min_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeProc:
+        def __init__(self) -> None:
+            self.returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return (b"ok", b"")
+
+    async def _fake_create_subprocess_shell(*args: object, **kwargs: object) -> _FakeProc:
+        return _FakeProc()
+
+    async def _fake_wait_for(awaitable: object, timeout: float | None = None) -> tuple[bytes, bytes]:
+        captured["timeout"] = timeout
+        return await awaitable
+
+    monkeypatch.setattr(bash_mod.asyncio, "create_subprocess_shell", _fake_create_subprocess_shell)
+    monkeypatch.setattr(bash_mod.asyncio, "wait_for", _fake_wait_for)
+
+    tool = BashTool()
+    result = await tool.execute(
+        command="./python/bin/python3.12 /tmp/test_nano_banana_2.py --mode text",
+        timeout=250,
+    )
+
+    assert result.success is True
+    assert captured["timeout"] == 300

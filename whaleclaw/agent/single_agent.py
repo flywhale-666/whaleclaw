@@ -361,6 +361,20 @@ _TASK_DONE_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*可以了?\s*$"),
     re.compile(r"^\s*ok\s*$", re.IGNORECASE),
 )
+_TASK_DONE_NEAR_MISS_RE = re.compile(
+    r"(?:本轮|这轮|这次|这一轮|本次).{0,4}(?:结束|完成|搞定|好了)"
+    r"|(?:结束|完成|搞定).{0,4}(?:啦|了|嘞|咯)",
+)
+
+
+def _is_task_done_intent_near_miss(text: str) -> bool:
+    """用户话语接近「任务完成」但不精确匹配 _TASK_DONE_PATTERNS 时返回 True。"""
+    stripped = text.strip()
+    if _is_task_done_confirmation(stripped, task_done_patterns=_TASK_DONE_PATTERNS):
+        return False
+    return bool(_TASK_DONE_NEAR_MISS_RE.search(stripped))
+
+
 _SKILL_LOCK_STATUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?:现在|当前).{0,8}(?:被)?锁定在.{0,8}(?:哪个|什么).{0,6}(?:技能|skill)"),
     re.compile(r"(?:现在|当前).{0,6}(?:技能|skill).{0,6}(?:锁定|状态)"),
@@ -1502,6 +1516,11 @@ def _resolve_nano_banana_input_paths(
         if latest_generated:
             return [latest_generated]
         return _recover_last_input_image_paths(session)
+    # 上一次是 edit 模式且有生成图片时，追加修改类消息沿用 edit 模式
+    if session is not None and _recover_last_nano_banana_mode(session) == "edit":
+        latest_generated = _recover_latest_generated_image_path(session)
+        if latest_generated:
+            return [latest_generated]
     return []
 
 
@@ -1515,7 +1534,7 @@ def _is_nano_banana_execution_request(
         return has_new_input_images
     if has_new_input_images:
         return True
-    if _is_nano_banana_control_message(stripped):
+    if _is_nano_banana_control_message(stripped) and not _message_requests_image_regenerate(stripped):
         return False
     if _is_task_done_confirmation(stripped, task_done_patterns=_TASK_DONE_PATTERNS):
         return False
@@ -1590,6 +1609,13 @@ def _parse_nano_banana_result_path(output: str) -> str:
         if match:
             return match.group(1).strip()
     return ""
+
+
+def _is_parallelizable_nano_banana_bash_call(tc: ToolCall) -> bool:
+    if tc.name != "bash":
+        return False
+    command = str(tc.arguments.get("command", "")).strip()
+    return "test_nano_banana" in command
 
 
 def _format_nano_banana_success_reply(
@@ -2573,6 +2599,11 @@ async def run_agent(
                     if session_manager is not None:
                         await session_manager.update_metadata(session, session.metadata)
                 return "全部子任务已完成，已解除技能锁定。"
+        elif lock_waiting_done and _is_task_done_intent_near_miss(message):
+            return (
+                "还没有完成正式解锁。"
+                "请直接回复\u201c任务完成\u201d或\u201c任务结束\u201d以解除技能锁定。"
+            )
         elif lock_waiting_done:
             lock_waiting_done = False
             skill_lock_resumed_from_waiting = True
@@ -2593,10 +2624,11 @@ async def run_agent(
             and _NON_SKILL_STEP_RE.search(message) is not None
         )
 
-        if (
+        _is_natural_activation = (
             not locked_skill_ids
             and routed_skill_ids
             and not _is_compound_with_other_steps
+            and use_cmd is None
             and (
                 _looks_like_skill_activation_message(
                     message,
@@ -2604,7 +2636,8 @@ async def run_agent(
                 )
                 or any(_skill_trigger_mentioned(skill, message) for skill in routed_skills)
             )
-        ):
+        )
+        if _is_natural_activation:
             if len(lockable_routed_skill_ids) >= 2 and session is not None:
                 # 多 lockable 技能 → 调 LLM 做任务拆解，建立串行队列
                 plan_messages = _build_skill_queue_plan_messages(
@@ -2660,11 +2693,19 @@ async def run_agent(
                     session.metadata["skill_lock_announce_pending"] = True
                     metadata_dirty = True
             else:
-                locked_skill_ids = lockable_routed_skill_ids
-                lock_is_explicit = bool(lockable_routed_skill_ids)
+                # 用户说"使用xxx技能"明确激活时，即使 lock_session=False 也锁定
+                _explicit_activation = _looks_like_skill_activation_message(
+                    message, skill_activation_patterns=_SKILL_ACTIVATION_PATTERNS,
+                )
+                effective_lock_ids = (
+                    lockable_routed_skill_ids
+                    or (routed_skill_ids if _explicit_activation else [])
+                )
+                locked_skill_ids = effective_lock_ids
+                lock_is_explicit = bool(effective_lock_ids)
                 lock_waiting_done = False
-                skill_announce_pending = bool(lockable_routed_skill_ids)
-                if session is not None and lockable_routed_skill_ids:
+                skill_announce_pending = bool(effective_lock_ids)
+                if session is not None and effective_lock_ids:
                     session.metadata["locked_skill_ids"] = locked_skill_ids
                     session.metadata["skill_lock_waiting_done"] = False
                     session.metadata["skill_lock_announce_pending"] = True
@@ -2703,6 +2744,10 @@ async def run_agent(
                 if explicit_switch:
                     requested_names = "、".join(routed_skill_ids)
                     current_names = "、".join(locked_skill_ids)
+                    if session is not None:
+                        session.metadata["pending_skill_switch_ids"] = routed_skill_ids
+                        session.metadata["pending_skill_switch_message"] = llm_message
+                        metadata_dirty = True
                     return (
                         f"当前会话仍锁定在 {current_names} 技能。"
                         f"如果你确实要切换到 {requested_names}，请先回复“任务完成”，"
@@ -2890,6 +2935,7 @@ async def run_agent(
                     "nano-banana-image-t8" in forced_skill_ids
                     and nano_banana_control_only
                     and not nano_banana_activation_only
+                    and not nano_banana_execution_request
                 ):
                     if session_manager is not None:
                         await session_manager.update_metadata(session, session.metadata)
@@ -3658,9 +3704,30 @@ async def run_agent(
             if _tool is not None and hasattr(_tool, "current_session_id"):
                 _tool.current_session_id = session_id  # type: ignore[union-attr]
 
+        parallel_nano_batches: dict[int, list[ToolCall]] = {}
+        batch_start: int | None = None
+        batch_calls: list[ToolCall] = []
+        for idx, candidate in enumerate(tool_calls):
+            if _is_parallelizable_nano_banana_bash_call(candidate):
+                if batch_start is None:
+                    batch_start = idx
+                    batch_calls = [candidate]
+                else:
+                    batch_calls.append(candidate)
+                continue
+            if batch_start is not None and len(batch_calls) > 1:
+                parallel_nano_batches[batch_start] = list(batch_calls)
+            batch_start = None
+            batch_calls = []
+        if batch_start is not None and len(batch_calls) > 1:
+            parallel_nano_batches[batch_start] = list(batch_calls)
+
         stop_for_evomap_choice = False
         stop_for_probe_loop = False
-        for tc in tool_calls:
+        skipped_parallel_tool_ids: set[str] = set()
+        for idx, tc in enumerate(tool_calls):
+            if tc.id in skipped_parallel_tool_ids:
+                continue
             if tc.name == "file_write" and isinstance(tc.arguments.get("content"), str):
                 for office_path in _extract_office_paths(str(tc.arguments.get("content", ""))):
                     if office_path not in pending_office_paths:
@@ -3682,8 +3749,40 @@ async def run_agent(
                             session_id=session_id,
                         )
 
-            if tc.id in _evomap_preflight_results:
+            executed_calls: list[tuple[ToolCall, str, ToolResult]]
+            if idx in parallel_nano_batches:
+                batch = parallel_nano_batches[idx]
+                skipped_parallel_tool_ids.update(item.id for item in batch[1:])
+                log.info(
+                    "agent.parallel_nano_banana_batch",
+                    round=round_idx,
+                    count=len(batch),
+                    session_id=session_id,
+                )
+                batch_results = await asyncio.gather(
+                    *[
+                        _execute_tool(
+                            registry,
+                            batch_tc,
+                            evomap_enabled=evomap_allowed_for_turn,
+                            browser_allowed=not browser_locked_by_evomap,
+                            office_block_bash_probe=office_block_bash_probe,
+                            office_block_message=office_block_message,
+                            office_edit_only=office_edit_only,
+                            office_edit_path=office_edit_path,
+                            on_tool_call=on_tool_call,
+                            on_tool_result=on_tool_result,
+                        )
+                        for batch_tc in batch
+                    ]
+                )
+                executed_calls = [
+                    (batch_tc, tc_id, result)
+                    for batch_tc, (tc_id, result) in zip(batch, batch_results, strict=True)
+                ]
+            elif tc.id in _evomap_preflight_results:
                 tc_id, result = _evomap_preflight_results[tc.id]
+                executed_calls = [(tc, tc_id, result)]
             else:
                 tc_id, result = await _execute_tool(
                     registry,
@@ -3697,161 +3796,162 @@ async def run_agent(
                     on_tool_call=on_tool_call,
                     on_tool_result=on_tool_result,
                 )
-            if (
-                tc.name == "ppt_edit"
-                and result.success
-                and _mentions_specific_dark_bar_target(llm_message)
-            ):
-                action = str(tc.arguments.get("action", "replace_text")).strip().lower()
-                if action == "apply_business_style" and "重设深色条 0 处" in (result.output or ""):
-                    result = ToolResult(
-                        success=False,
-                        output=result.output,
-                        error="未命中用户指定对象：黑色横条仍未被替换，请继续定向修改该元素",
-                    )
-                elif action == "set_background":
-                    result = ToolResult(
-                        success=False,
-                        output=result.output,
-                        error="用户要求修改黑色横条，仅设置背景不算完成，请继续定向修改该横条",
-                    )
-            if tc.name == "evomap_fetch" and result.success:
-                candidates = _parse_evomap_fetch_candidates(result.output or "")
-                if len(candidates) > 3 and session is not None:
-                    top3 = _pick_top_evomap_candidates(llm_message, candidates, limit=3)
-                    session.metadata["evomap_pending_choices"] = {
-                        "origin_message": llm_message,
-                        "options": [{"asset_id": aid, "summary": summary} for aid, summary in top3],
-                    }
-                    if session_manager is not None:
-                        await session_manager._store.update_session_field(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                            session.id,
-                            metadata=session.metadata,
-                        )
-                    final_text_parts.append(_build_evomap_choice_prompt(top3))
-                    stop_for_evomap_choice = True
-                    break
-                browser_locked_by_evomap = not _is_no_match_evomap_output(result)
-            guard_update = apply_tool_result_guards(
-                guard_state,
-                tc,
-                result,
-                office_loop_guard_enabled=office_loop_guard_enabled,
-                image_api_probe_guard_enabled=image_api_probe_guard_enabled,
-                session_id=session_id,
-            )
-            for event in guard_update.log_events:
-                getattr(log, event.level)(event.event, **event.fields)
-            for prompt in guard_update.conversation_messages:
-                conversation.append(Message(role="user", content=prompt))
-            final_text_parts.extend(guard_update.final_texts)
-            if guard_update.stop_for_probe_loop:
-                stop_for_probe_loop = True
-                break
-
-            if result.success and result.output:
-                successful_tool_calls += 1
-                for path_match in re.finditer(
-                    r"(/[^\s]+\.(?:jpg|jpeg|png|gif|webp))", result.output
-                ):
-                    image_path = path_match.group(1)
-                    real_image_paths.append(image_path)
-                    if (
-                        session is not None
-                        and Path(image_path).expanduser().is_file()
-                        and session.metadata.get("last_generated_image_path") != image_path
-                    ):
-                        session.metadata["last_generated_image_path"] = image_path
-                        _append_image_reference_history(session.metadata, [image_path])
-                        metadata_dirty = True
-            elif result.success:
-                successful_tool_calls += 1
-                if session is not None:
-                    for office_path in _extract_office_paths(result.output):
-                        if _remember_office_path(session.metadata, office_path):
-                            metadata_dirty = True
-            if session is not None and pending_office_paths:
-                for office_path in list(pending_office_paths):
-                    if Path(office_path).expanduser().exists():
-                        if _remember_office_path(session.metadata, office_path):
-                            metadata_dirty = True
-                        pending_office_paths.remove(office_path)
-            if (
-                session is not None
-                and tc.name == "bash"
-                and result.success
-                and _capture_latest_pptx(
-                    session.metadata,
-                    roots=(
-                        Path("/tmp"),
-                        Path("/private/tmp"),
-                        Path.home() / "Downloads",
-                        Path.home() / ".whaleclaw" / "workspace",
-                    ),
-                    window_seconds=240,
-                )
-            ):
-                metadata_dirty = True
-
-            if (
-                session is not None
-                and tc.name == "bash"
-                and result.success
-                and "nano-banana-image-t8" in locked_skill_ids
-            ):
-                _nb_output = result.output or ""
-                _nb_image_path = _parse_nano_banana_result_path(_nb_output)
-                if _nb_image_path and Path(_nb_image_path).expanduser().is_file():
-                    session.metadata["last_generated_image_path"] = _nb_image_path
-                    _append_image_reference_history(
-                        session.metadata, [_nb_image_path]
-                    )
-                    metadata_dirty = True
-
-            if session is not None and tc.name in {"ppt_edit", "docx_edit", "xlsx_edit"}:
-                arg_path = tc.arguments.get("path")
+                executed_calls = [(tc, tc_id, result)]
+            for tc, tc_id, result in executed_calls:
                 if (
-                    isinstance(arg_path, str)
-                    and arg_path.strip()
-                    and _remember_office_path(session.metadata, arg_path.strip())
+                    tc.name == "ppt_edit"
+                    and result.success
+                    and _mentions_specific_dark_bar_target(llm_message)
+                ):
+                    action = str(tc.arguments.get("action", "replace_text")).strip().lower()
+                    if action == "apply_business_style" and "重设深色条 0 处" in (result.output or ""):
+                        result = ToolResult(
+                            success=False,
+                            output=result.output,
+                            error="未命中用户指定对象：黑色横条仍未被替换，请继续定向修改该元素",
+                        )
+                    elif action == "set_background":
+                        result = ToolResult(
+                            success=False,
+                            output=result.output,
+                            error="用户要求修改黑色横条，仅设置背景不算完成，请继续定向修改该横条",
+                        )
+                if tc.name == "evomap_fetch" and result.success:
+                    candidates = _parse_evomap_fetch_candidates(result.output or "")
+                    if len(candidates) > 3 and session is not None:
+                        top3 = _pick_top_evomap_candidates(llm_message, candidates, limit=3)
+                        session.metadata["evomap_pending_choices"] = {
+                            "origin_message": llm_message,
+                            "options": [{"asset_id": aid, "summary": summary} for aid, summary in top3],
+                        }
+                        if session_manager is not None:
+                            await session_manager._store.update_session_field(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
+                                session.id,
+                                metadata=session.metadata,
+                            )
+                        final_text_parts.append(_build_evomap_choice_prompt(top3))
+                        stop_for_evomap_choice = True
+                        break
+                    browser_locked_by_evomap = not _is_no_match_evomap_output(result)
+                guard_update = apply_tool_result_guards(
+                    guard_state,
+                    tc,
+                    result,
+                    office_loop_guard_enabled=office_loop_guard_enabled,
+                    image_api_probe_guard_enabled=image_api_probe_guard_enabled,
+                    session_id=session_id,
+                )
+                for event in guard_update.log_events:
+                    getattr(log, event.level)(event.event, **event.fields)
+                for prompt in guard_update.conversation_messages:
+                    conversation.append(Message(role="user", content=prompt))
+                final_text_parts.extend(guard_update.final_texts)
+                if guard_update.stop_for_probe_loop:
+                    stop_for_probe_loop = True
+                    break
+
+                if result.success and result.output:
+                    successful_tool_calls += 1
+                    for path_match in re.finditer(
+                        r"(/[^\s]+\.(?:jpg|jpeg|png|gif|webp))", result.output
+                    ):
+                        image_path = path_match.group(1)
+                        real_image_paths.append(image_path)
+                        if (
+                            session is not None
+                            and Path(image_path).expanduser().is_file()
+                            and session.metadata.get("last_generated_image_path") != image_path
+                        ):
+                            session.metadata["last_generated_image_path"] = image_path
+                            _append_image_reference_history(session.metadata, [image_path])
+                            metadata_dirty = True
+                elif result.success:
+                    successful_tool_calls += 1
+                    if session is not None:
+                        for office_path in _extract_office_paths(result.output):
+                            if _remember_office_path(session.metadata, office_path):
+                                metadata_dirty = True
+                if session is not None and pending_office_paths:
+                    for office_path in list(pending_office_paths):
+                        if Path(office_path).expanduser().exists():
+                            if _remember_office_path(session.metadata, office_path):
+                                metadata_dirty = True
+                            pending_office_paths.remove(office_path)
+                if (
+                    session is not None
+                    and tc.name == "bash"
+                    and result.success
+                    and _capture_latest_pptx(
+                        session.metadata,
+                        roots=(
+                            Path("/tmp"),
+                            Path("/private/tmp"),
+                            Path.home() / "Downloads",
+                            Path.home() / ".whaleclaw" / "workspace",
+                        ),
+                        window_seconds=240,
+                    )
                 ):
                     metadata_dirty = True
 
-            tool_output = _format_tool_output(result)
+                if (
+                    session is not None
+                    and tc.name == "bash"
+                    and result.success
+                    and "nano-banana-image-t8" in locked_skill_ids
+                ):
+                    _nb_output = result.output or ""
+                    _nb_image_path = _parse_nano_banana_result_path(_nb_output)
+                    if _nb_image_path and Path(_nb_image_path).expanduser().is_file():
+                        session.metadata["last_generated_image_path"] = _nb_image_path
+                        _append_image_reference_history(
+                            session.metadata, [_nb_image_path]
+                        )
+                        metadata_dirty = True
 
-            if not result.success:
-                _dedup_consecutive_errors(conversation, tc.name, tool_output)
+                if session is not None and tc.name in {"ppt_edit", "docx_edit", "xlsx_edit"}:
+                    arg_path = tc.arguments.get("path")
+                    if (
+                        isinstance(arg_path, str)
+                        and arg_path.strip()
+                        and _remember_office_path(session.metadata, arg_path.strip())
+                    ):
+                        metadata_dirty = True
 
-            if native_tools:
-                tool_msg = Message(
-                    role="tool",
-                    content=tool_output,
-                    tool_call_id=tc_id,
+                tool_output = _format_tool_output(result)
+
+                if native_tools:
+                    tool_msg = Message(
+                        role="tool",
+                        content=tool_output,
+                        tool_call_id=tc_id,
+                    )
+                else:
+                    tool_msg = Message(
+                        role="user",
+                        content=(f"[工具 {tc.name} 执行结果]\n{tool_output}"),
+                    )
+                conversation.append(tool_msg)
+
+                if session_manager and session and not _is_transient_cli_usage_error(result):
+                    snippet = tool_output[:500] if len(tool_output) > 500 else tool_output
+                    await _persist_message(
+                        session_manager,
+                        session,
+                        "tool",
+                        f"[{tc.name}] {snippet}",
+                        tool_call_id=tc_id,
+                        tool_name=tc.name,
+                    )
+
+                log.debug(
+                    "agent.tool_result",
+                    tool=tc.name,
+                    success=result.success,
+                    output_len=len(result.output),
                 )
-            else:
-                tool_msg = Message(
-                    role="user",
-                    content=(f"[工具 {tc.name} 执行结果]\n{tool_output}"),
-                )
-            conversation.append(tool_msg)
-
-            if session_manager and session and not _is_transient_cli_usage_error(result):
-                snippet = tool_output[:500] if len(tool_output) > 500 else tool_output
-                await _persist_message(
-                    session_manager,
-                    session,
-                    "tool",
-                    f"[{tc.name}] {snippet}",
-                    tool_call_id=tc_id,
-                    tool_name=tc.name,
-                )
-
-            log.debug(
-                "agent.tool_result",
-                tool=tc.name,
-                success=result.success,
-                output_len=len(result.output),
-            )
+            if stop_for_evomap_choice or stop_for_probe_loop:
+                break
 
         if stop_for_evomap_choice:
             break

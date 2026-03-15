@@ -13,6 +13,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Literal
 
+from whaleclaw.agent.helpers.tool_execution import (
+    is_nano_banana_preflight_error as _is_nano_banana_preflight_error,
+)
 from whaleclaw.agent.helpers.image_search import (
     extract_planned_image_count,
     is_search_images_call,
@@ -243,15 +246,33 @@ def apply_tool_result_guards(
                 )
 
     if tc.name == "bash":
+        is_timeout = bool(result.error and "命令超时" in result.error)
         if result.success:
             state.bash_fail_streak = 0
             state.same_failed_bash_streak = 0
             state.last_failed_bash_signature = ""
         else:
+            cmd_text = str(tc.arguments.get("command", ""))
+            is_image_gen = "test_nano_banana" in cmd_text
+            if is_image_gen:
+                # 参数/命令行校验错误尚未真正进入生图流程，允许修正参数后立即重试。
+                if _is_nano_banana_preflight_error(result):
+                    update.conversation_messages.append(
+                        "[系统提示] 上一次 Nano Banana 命令在进入实际生图流程前就失败了。"
+                        "如果是参数错误或脚本调用方式错误，允许你立刻修正后重试一次；"
+                        "但必须修改错误点，禁止原样重试。"
+                    )
+                    return update
+
+                # 真正进入生图流程后的失败独立处理，不参与通用 bash 熔断计数。
+                update.conversation_messages.append(
+                    "[系统提示] 本次生图失败，禁止自动重试。"
+                    "继续执行剩余任务，最终将成功和失败的结果一并回复用户，"
+                    "由用户决定是否对失败的图重新操作。"
+                )
+                return update
             state.bash_fail_streak += 1
-            failed_sig = normalize_bash_command_signature(
-                str(tc.arguments.get("command", ""))
-            )
+            failed_sig = normalize_bash_command_signature(cmd_text)
             if failed_sig and failed_sig == state.last_failed_bash_signature:
                 state.same_failed_bash_streak += 1
             elif failed_sig:
@@ -260,6 +281,12 @@ def apply_tool_result_guards(
             else:
                 state.same_failed_bash_streak = 0
                 state.last_failed_bash_signature = ""
+            if is_timeout and state.same_failed_bash_streak < 3:
+                update.conversation_messages.append(
+                    "[系统提示] bash 命令超时，子进程已被终止。"
+                    "如需重试，请检查参数并增大 timeout。"
+                    "禁止不改参数直接重试。"
+                )
             if state.same_failed_bash_streak >= 3 and "bash" not in state.blocked_tools:
                 state.blocked_tools.add("bash")
                 update.log_events.append(

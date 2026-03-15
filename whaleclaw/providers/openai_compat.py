@@ -20,6 +20,7 @@ from whaleclaw.providers.base import (
     Message,
     ToolCall,
     ToolSchema,
+    repair_tool_call_pairs,
 )
 from whaleclaw.types import ProviderAuthError, ProviderError, ProviderRateLimitError, StreamCallback
 from whaleclaw.utils.log import get_logger
@@ -91,6 +92,7 @@ class OpenAICompatProvider(LLMProvider):
         model: str,
         tools: list[ToolSchema] | None,
     ) -> dict[str, Any]:
+        messages = repair_tool_call_pairs(messages)
         msgs: list[dict[str, Any]] = []
         for m in messages:
             if m.role == "assistant" and m.tool_calls:

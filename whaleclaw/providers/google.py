@@ -18,6 +18,7 @@ from whaleclaw.providers.base import (
     Message,
     ToolCall,
     ToolSchema,
+    repair_tool_call_pairs,
 )
 from whaleclaw.types import ProviderAuthError, ProviderError, ProviderRateLimitError, StreamCallback
 from whaleclaw.utils.log import get_logger
@@ -49,6 +50,7 @@ class GoogleProvider(LLMProvider):
         messages: list[Message],
         tools: list[ToolSchema] | None,
     ) -> dict[str, Any]:
+        messages = repair_tool_call_pairs(messages)
         system_text = ""
         contents: list[dict[str, Any]] = []
 

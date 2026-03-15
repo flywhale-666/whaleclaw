@@ -14,9 +14,8 @@ class SkillRouter:
         self,
         user_message: str,
         available_skills: list[Skill],
-        max_skills: int = 2,
     ) -> list[Skill]:
-        """Select top skills by /use command or keyword score."""
+        """Select all skills that match the user message by keyword."""
         msg = user_message.strip()
         lower = msg.lower()
         if msg.startswith("/use "):
@@ -25,29 +24,20 @@ class SkillRouter:
                 if s.id.lower() == skill_id:
                     return [s]
 
-        # Explicit skill mention in natural language:
-        # e.g. "用 ppt-generator 这个技能" / "use skill ppt-generator".
         if any(marker in lower for marker in ("技能", "skill")):
             explicit: list[Skill] = []
             for s in available_skills:
                 if self._mentions_skill(msg, s):
                     explicit.append(s)
             if explicit:
-                explicit.sort(key=lambda x: x.id)
-                return explicit[:max_skills]
+                return explicit
 
-        scored = [(self._score(msg, s), s) for s in available_skills]
-        scored = [(score, s) for score, s in scored if score > 0]
-        scored.sort(key=lambda x: (-x[0], x[1].id))
-        return [s for _, s in scored[:max_skills]]
+        return [s for s in available_skills if self._has_trigger_hit(lower, s)]
 
-    def _score(self, message: str, skill: Skill) -> float:
-        """Return hit_count / total_triggers, 0 if no triggers."""
-        if not skill.triggers:
-            return 0.0
-        lower = message.lower()
-        hits = sum(1 for t in skill.triggers if t.lower() in lower)
-        return hits / len(skill.triggers)
+    @staticmethod
+    def _has_trigger_hit(lower_message: str, skill: Skill) -> bool:
+        """Return True if any trigger keyword appears in the message."""
+        return any(t.lower() in lower_message for t in skill.triggers)
 
     @staticmethod
     def _norm_text(text: str) -> str:

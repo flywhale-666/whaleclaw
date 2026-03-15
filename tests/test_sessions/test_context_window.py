@@ -77,7 +77,13 @@ class TestContextWindow:
         trimmed = cw.trim(msgs, "qwen3.5-plus")
         contents = [m.content for m in trimmed]
         assert any(c.startswith("[L1压缩]") for c in contents)
-        assert any(c.startswith("[L0压缩]") or c.startswith("[历史压缩摘要]") for c in contents)
+        # L0 压缩后的组可能因 budget 不足被丢弃，进入 compacted 摘要
+        assert any(
+            c.startswith("[L0压缩]")
+            or c.startswith("[历史压缩摘要]")
+            or c.startswith("[以下是本会话的历史摘要")
+            for c in contents
+        )
 
     def test_caps_content_tokens_close_to_1600(self) -> None:
         cw = ContextWindow()
@@ -128,5 +134,9 @@ class TestTrimWithSummaries:
         ]
 
         trimmed = cw.trim_with_summaries(msgs, "qwen3.5-plus", summaries)
-        assert any(m.content.startswith("[历史压缩摘要]") for m in trimmed)
+        assert any(
+            m.content.startswith("[历史压缩摘要]")
+            or m.content.startswith("[以下是本会话的历史摘要")
+            for m in trimmed
+        )
         assert trimmed[-1].content == "最后第三条"
