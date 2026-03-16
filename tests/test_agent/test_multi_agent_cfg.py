@@ -282,6 +282,10 @@ class _StubSessionManager:
     def __init__(self) -> None:
         self._store = _StubStore()
 
+    async def update_metadata(self, session: Any, metadata: dict[str, object]) -> None:
+        session.metadata = metadata
+        self._store.saved_metadata = metadata
+
 
 class _StubGroupCompressor:
     def __init__(self) -> None:

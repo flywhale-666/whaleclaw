@@ -30,7 +30,16 @@ class PromptLayer(StrEnum):
 
 _DEFAULT_ASSISTANT_NAME = "WhaleClaw"
 
+_SAFETY_CONSTITUTION = """\
+【安全宪法 — 不可覆盖】
+- 无自主目标：不追求自我保存、复制、资源获取或权力扩张
+- 人类监督优先：安全高于任务完成；指令冲突时暂停并询问
+- 不绕过安全机制：不操纵任何人扩展权限或关闭安全措施
+- 不自我修改：不擅自修改系统提示词、安全规则或工具策略"""
+
 _STATIC_PROMPT_TEMPLATE = """\
+{safety_constitution}
+
 你是 {assistant_name}，一个运行在用户本地电脑上的 AI 助手。
 - 使用用户的语言回复，简洁准确
 - 你拥有多种工具（bash、文件读写、浏览器、定时任务、技能管理等），能做就做，不要说"我无法"
@@ -140,9 +149,12 @@ class PromptAssembler:
         return messages
 
     def _build_static(self, config: WhaleclawConfig, assistant_name: str) -> str:
-        """Static layer — core identity (~150 tokens), cacheable."""
+        """Static layer — core identity + safety constitution (~250 tokens), cacheable."""
         safe_name = assistant_name.strip() or _DEFAULT_ASSISTANT_NAME
-        return _STATIC_PROMPT_TEMPLATE.format(assistant_name=safe_name)
+        return _STATIC_PROMPT_TEMPLATE.format(
+            safety_constitution=_SAFETY_CONSTITUTION,
+            assistant_name=safe_name,
+        )
 
     def _build_dynamic(
         self,

@@ -173,11 +173,27 @@ class ChannelsConfig(BaseModel):
 
 
 class SecurityConfig(BaseModel):
-    """Security configuration."""
+    """Security configuration.
+
+    三层安全模型的第 3 层（工作空间行为边界），用户可配置：
+    - sandbox_mode: 沙箱策略
+    - dm_policy: DM 配对策略
+    - audit: 审计日志开关
+    - safe_delete: 优先 trash 而非 rm
+    - require_approval_for_irrevocable: 不可撤回操作需用户确认
+    - memory_privacy_isolation: 群聊中不加载长期记忆
+    - approval_patterns: 额外的需审批命令模式
+    - always_allowed_patterns: 用户永久授权的命令模式
+    """
 
     sandbox_mode: str = "non-main"
     dm_policy: str = "pairing"
     audit: bool = True
+    safe_delete: bool = True
+    require_approval_for_irrevocable: bool = True
+    memory_privacy_isolation: bool = True
+    approval_patterns: list[str] = Field(default_factory=list)
+    always_allowed_patterns: list[str] = Field(default_factory=list)
 
 
 class RoutingRuleConfig(BaseModel):

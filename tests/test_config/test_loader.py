@@ -38,9 +38,11 @@ class TestEnvOverrides:
 
 
 class TestLoadConfig:
-    def test_defaults(self) -> None:
+    def test_defaults(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("WHALECLAW_GATEWAY_PORT", raising=False)
+        monkeypatch.chdir(tmp_path)
         reset_config()
-        cfg = load_config()
+        cfg = load_config(config_path=tmp_path / "nonexistent.json")
         assert cfg.gateway.port == 18666
 
     def test_cli_overrides(self) -> None:

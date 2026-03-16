@@ -296,7 +296,7 @@ class FeishuBot:
             start = len(pending_paths) - len(inbound_images) + 1
             labels = self._format_image_range(start, len(pending_paths))
             return (
-                f"已收到{labels}。继续上传图片，或发送提示词并以“提交”结尾后开始执行。",
+                f"已收到{labels}。继续上传图片，或发送提示词开始执行。",
                 None,
                 None,
             )
@@ -848,6 +848,11 @@ class FeishuBot:
                 for elem in line:
                     if elem.get("tag") == "img" and elem.get("image_key"):
                         image_keys.append(elem["image_key"])
+            raw_keys = content.get("image_keys")
+            if isinstance(raw_keys, list):
+                for k in raw_keys:
+                    if isinstance(k, str) and k and k not in image_keys:
+                        image_keys.append(k)
 
         if not image_keys:
             return []

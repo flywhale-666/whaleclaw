@@ -52,25 +52,39 @@ def list_mcporter_servers() -> list[dict[str, Any]]:
         if result.returncode != 0:
             log.debug("mcp.mcporter_list_failed", stderr=result.stderr.strip())
             return []
-        data: list[dict[str, Any]] | Any = json.loads(result.stdout)
-        if isinstance(data, list):
-            return [
-                _sanitize_server(s)
-                for s in data
-                if isinstance(s, dict)
-            ]
-        return []
+        raw: Any = json.loads(result.stdout)
+        # mcporter list --json 返回 {"servers": [...], ...}
+        servers: list[Any] = []
+        if isinstance(raw, dict):
+            servers = raw.get("servers", [])
+        elif isinstance(raw, list):
+            servers = raw
+        return [
+            _sanitize_server(s)
+            for s in servers
+            if isinstance(s, dict)
+        ]
     except Exception as exc:
         log.debug("mcp.mcporter_list_error", error=str(exc))
         return []
 
 
-def remove_mcporter_server(server_id: str) -> bool:
-    """Remove a server managed by mcporter. Returns ``True`` on success."""
+def remove_mcporter_server(server_id: str, config_path: str | None = None) -> bool:
+    """Remove a server managed by mcporter. Returns ``True`` on success.
+
+    Args:
+        server_id: 服务名称（mcporter config remove <name>）。
+        config_path: 配置文件路径。mcporter list 返回的 source.path 指明服务
+            定义在哪个 json 中，删除时需指向同一文件，否则默认只查本地配置。
+    """
     if not is_mcporter_available():
         return False
     try:
-        result = _run_mcporter("config", "remove", server_id)
+        args: list[str] = []
+        if config_path:
+            args.extend(["--config", config_path])
+        args.extend(["config", "remove", server_id])
+        result = _run_mcporter(*args)
         return result.returncode == 0
     except Exception as exc:
         log.debug("mcp.mcporter_remove_error", error=str(exc))
@@ -104,6 +118,9 @@ def aggregate_mcp_servers(
 
     for s in list_mcporter_servers():
         entry = dict(s)
+        raw_source = entry.get("source")
+        if isinstance(raw_source, dict):
+            entry["config_path"] = raw_source.get("path", "")
         entry["source"] = "mcporter"
         result.append(entry)
 
@@ -119,9 +136,9 @@ class McpManageTool(Tool):
             name="mcp_manage",
             description=(
                 "Manage MCP (Model Context Protocol) services: "
-                "list configured MCP servers, or remove a server by id. "
-                "If no servers exist, suggest the user configure via "
-                "'./node/bin/mcporter config add <name> --url <url>'."
+                "list configured MCP servers, or remove a server by name. "
+                "To add a new server, use bash tool: "
+                "./node/bin/mcporter config add <name> --url <url>"
             ),
             parameters=[
                 ToolParameter(
@@ -131,9 +148,9 @@ class McpManageTool(Tool):
                     enum=["list", "remove"],
                 ),
                 ToolParameter(
-                    name="server_id",
+                    name="name",
                     type="string",
-                    description="Server id to remove (required for remove action).",
+                    description="Server name to remove (required for remove action).",
                     required=False,
                 ),
             ],
@@ -141,14 +158,14 @@ class McpManageTool(Tool):
 
     async def execute(self, **kwargs: object) -> ToolResult:
         action = str(kwargs.get("action", "")).lower()
+        name = str(kwargs.get("name", "")).strip() if kwargs.get("name") else ""
 
         if action == "list":
             return self._list()
         if action == "remove":
-            sid = str(kwargs.get("server_id", "")) if kwargs.get("server_id") else None
-            if not sid:
-                return ToolResult(success=False, output="", error="remove 需要 server_id")
-            return self._remove(sid)
+            if not name:
+                return ToolResult(success=False, output="", error="remove 需要 name")
+            return self._remove(name)
         return ToolResult(success=False, output="", error=f"未知操作: {action}")
 
     def _list(self) -> ToolResult:
@@ -170,12 +187,22 @@ class McpManageTool(Tool):
             lines.append(f"- {name} [{source}] transport={transport} status={status}")
         return ToolResult(success=True, output="\n".join(lines))
 
-    def _remove(self, server_id: str) -> ToolResult:
-        ok = remove_mcporter_server(server_id)
+    def _remove(self, name: str) -> ToolResult:
+        config_path = self._find_config_path(name)
+        ok = remove_mcporter_server(name, config_path=config_path)
         if ok:
-            return ToolResult(success=True, output=f"已删除 MCP 服务: {server_id}")
+            return ToolResult(success=True, output=f"已删除 MCP 服务: {name}")
         return ToolResult(
             success=False,
             output="",
-            error=f"删除失败: {server_id}（mcporter 不可用或服务不存在）",
+            error=f"删除失败: {name}（mcporter 不可用或服务不存在）",
         )
+
+    @staticmethod
+    def _find_config_path(name: str) -> str | None:
+        """从当前服务列表中查找指定服务所在的配置文件路径。"""
+        for s in aggregate_mcp_servers():
+            sname = s.get("name") or s.get("id") or ""
+            if sname == name and s.get("config_path"):
+                return str(s["config_path"])
+        return None

@@ -155,7 +155,7 @@ class PatchApplyTool(Tool):
                     patch_path.unlink(missing_ok=True)
 
 
-async def _run_cmd(cmd: list[str], cwd: Path) -> tuple[str, str, int]:
+async def _run_cmd(cmd: list[str], cwd: Path, *, timeout: int = 30) -> tuple[str, str, int]:
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -165,7 +165,15 @@ async def _run_cmd(cmd: list[str], cwd: Path) -> tuple[str, str, int]:
         )
     except FileNotFoundError:
         return ("", f"命令不存在: {cmd[0]}", 127)
-    out_b, err_b = await proc.communicate()
+    try:
+        out_b, err_b = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except TimeoutError:
+        try:
+            proc.kill()
+            await proc.wait()
+        except ProcessLookupError:
+            pass
+        return ("", f"命令超时 ({timeout}s): {cmd[0]}", 1)
     out = out_b.decode(errors="replace")[:_MAX_OUTPUT]
     err = err_b.decode(errors="replace")[:_MAX_OUTPUT]
     code = proc.returncode or 0

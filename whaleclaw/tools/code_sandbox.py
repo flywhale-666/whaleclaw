@@ -60,6 +60,11 @@ class CodeSandboxTool(Tool):
                 proc.communicate(), timeout=timeout
             )
         except TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
             return ToolResult(
                 success=False,
                 output="",

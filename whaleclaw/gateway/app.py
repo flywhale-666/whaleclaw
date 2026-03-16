@@ -1252,9 +1252,13 @@ def create_app(config: WhaleclawConfig) -> FastAPI:
         })
 
     @app.delete("/api/mcp/servers/{server_id}")
-    async def _api_delete_mcp_server(server_id: str, source: str = "mcporter") -> JSONResponse:
+    async def _api_delete_mcp_server(
+        server_id: str,
+        source: str = "mcporter",
+        config_path: str = "",
+    ) -> JSONResponse:
         if source == "mcporter":
-            ok = remove_mcporter_server(server_id)
+            ok = remove_mcporter_server(server_id, config_path=config_path or None)
             if ok:
                 return JSONResponse({"ok": True})
             return JSONResponse({"error": "删除失败（mcporter 未安装或服务不存在）"}, status_code=400)

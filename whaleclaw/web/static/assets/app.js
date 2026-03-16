@@ -574,9 +574,11 @@ createApp({
       mcpLoading.value = false;
     }
 
-    async function removeMcpServer(serverId, source) {
+    async function removeMcpServer(serverId, source, configPath) {
       try {
-        await apiFetch(`/api/mcp/servers/${encodeURIComponent(serverId)}?source=${encodeURIComponent(source)}`, { method: 'DELETE' });
+        let qs = `source=${encodeURIComponent(source)}`;
+        if (configPath) qs += `&config_path=${encodeURIComponent(configPath)}`;
+        await apiFetch(`/api/mcp/servers/${encodeURIComponent(serverId)}?${qs}`, { method: 'DELETE' });
         mcpServers.value = mcpServers.value.filter(s => (s.id || s.name) !== serverId);
       } catch (e) {
         showUiAlert(e.message || '删除 MCP 服务失败');
@@ -2480,7 +2482,7 @@ createApp({
                     <div class="panel-card-desc" v-if="s.status" style="margin-top:2px;font-size:12px">状态: {{ s.status }}</div>
                   </div>
                   <div style="display:flex;gap:6px;margin-top:8px">
-                    <button class="btn-sm btn-danger" @click="removeMcpServer(s.id || s.name, s.source)">删除</button>
+                    <button class="btn-sm btn-danger" @click="removeMcpServer(s.id || s.name, s.source, s.config_path)">删除</button>
                   </div>
                 </div>
               </div>

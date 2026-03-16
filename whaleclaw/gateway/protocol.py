@@ -25,6 +25,8 @@ class MessageType(StrEnum):
     CANVAS_PUSH = "canvas_push"
     CANVAS_RESET = "canvas_reset"
     CANVAS_EVENT = "canvas_event"
+    APPROVAL_REQUEST = "approval_request"
+    APPROVAL_RESPONSE = "approval_response"
 
 
 class WSMessage(BaseModel):
@@ -117,4 +119,32 @@ def make_canvas_reset(session_id: str) -> WSMessage:
         type=MessageType.CANVAS_RESET,
         session_id=session_id,
         payload={},
+    )
+
+
+def make_approval_request(
+    session_id: str,
+    tool_name: str,
+    command: str,
+    reason: str,
+    request_id: str | None = None,
+) -> WSMessage:
+    """Create an approval request for a high-risk tool call.
+
+    payload:
+        tool: 工具名
+        command: 完整命令内容（不截断不篡改）
+        reason: 需要审批的原因
+        request_id: 用于关联 response 的唯一 ID
+    """
+    rid = request_id or uuid4().hex
+    return WSMessage(
+        type=MessageType.APPROVAL_REQUEST,
+        session_id=session_id,
+        payload={
+            "tool": tool_name,
+            "command": command,
+            "reason": reason,
+            "request_id": rid,
+        },
     )

@@ -109,7 +109,7 @@ def _make_param_item_from_keyword(keyword: str, *, required: bool) -> SkillParam
     return None
 
 
-_PARAM_HINT_KEYWORDS = ("最小必填", "必填", "确认参数", "缺啥补啥", "缺少参数")
+_PARAM_HINT_KEYWORDS = ("最小必填", "必填", "确认参数", "缺啥补啥", "缺少参数", "可选")
 _PARAM_HINT_EXCLUDE = ("必须遵守", "必须使用", "必须包含", "必须保持", "必须在", "命令行参数")
 
 

@@ -406,10 +406,14 @@ class MemoryManager:
         *,
         include_profile: bool = True,
         include_raw: bool = True,
+        is_shared_context: bool = False,
     ) -> str:
         parts: list[str] = []
         used = 0
         recent = await self._store.list_recent(limit=300)
+        # 隐私隔离：群聊等共享上下文中不加载个人画像，防止隐私泄露
+        if is_shared_context:
+            include_profile = False
         if include_profile:
             latest_l1 = next(
                 (
@@ -470,8 +474,11 @@ class MemoryManager:
         router: ModelRouter | None = None,
         model_id: str = "",
         exclude_style: bool = False,
+        is_shared_context: bool = False,
     ) -> str:
         """Build profile injection text from latest L1, compressing by LLM if needed."""
+        if is_shared_context:
+            return ""
         recent = await self._store.list_recent(limit=300)
         latest_l1 = next(
             (
