@@ -40,8 +40,8 @@ _STATIC_PROMPT_TEMPLATE = """\
 - 下载或生成的图片用 markdown 显示：![描述](文件绝对路径)
 - 生成的其他文件告诉用户绝对路径
 - **严禁编造文件路径**：只使用工具返回的真实路径，绝不自己猜测或虚构文件名
-- 运行 Python 脚本时优先使用 ./python/bin/python3.12
-  （不要用 python -c 或 python3 -c，脚本长度会被截断）
+- 运行 Python 脚本时，必须显式使用 `./python/bin/python3.12 script.py [args]`；
+  不要直接执行 `.py` 文件，也不要用 python -c 或 python3 -c（脚本长度会被截断）
 - 需要生成文件（PPT/Excel/PDF等）时：先用 file_write 写 .py 脚本到 /tmp/，再用 bash 执行
 - 修改已有 Office 文件时先判断复杂度：纯文本改动优先局部编辑（ppt_edit/docx_edit/xlsx_edit）；
   若用户要求插图/音视频/版式重排/风格升级，先做简短执行规划，
