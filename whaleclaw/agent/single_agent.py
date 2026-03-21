@@ -1,3 +1,4 @@
+# pyright: reportUnknownVariableType=false, reportUnknownArgumentType=false, reportUnknownMemberType=false, reportAssignmentType=false, reportRedeclaration=false, reportUnusedFunction=false, reportUnusedImport=false, reportUnnecessaryCast=false, reportUnnecessaryIsInstance=false, reportUnusedVariable=false, reportGeneralTypeIssues=false, reportInvalidTypeForm=false, reportUnusedVariable=false, reportGeneralTypeIssues=false
 """Agent main loop — message -> LLM -> tool -> reply (multi-turn).
 
 The loop is provider-agnostic.  Tool invocation follows a single code
@@ -12,12 +13,50 @@ path regardless of whether the provider supports native ``tools`` API:
 import asyncio
 import base64
 import re
-import shlex
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 from whaleclaw.agent.context import OnToolCall, OnToolResult
+from whaleclaw.agent.helpers.evomap_helpers import (
+    build_evomap_choice_prompt as _build_evomap_choice_prompt,
+)
+from whaleclaw.agent.helpers.evomap_helpers import (
+    build_evomap_first_system_message as _build_evomap_first_system_message,
+)
+from whaleclaw.agent.helpers.evomap_helpers import (
+    extract_evomap_choice_index as _extract_evomap_choice_index,
+)
+from whaleclaw.agent.helpers.evomap_helpers import (
+    extract_topic_terms as _extract_topic_terms,
+)
+from whaleclaw.agent.helpers.evomap_helpers import (
+    extra_memory_has_evomap_hint as _extra_memory_has_evomap_hint,
+)
+from whaleclaw.agent.helpers.evomap_helpers import (
+    infer_task_kind as _infer_task_kind,
+)
+from whaleclaw.agent.helpers.evomap_helpers import (
+    is_evomap_enabled as _is_evomap_enabled,
+)
+from whaleclaw.agent.helpers.evomap_helpers import (
+    is_evomap_status_question as _is_evomap_status_question,
+)
+from whaleclaw.agent.helpers.evomap_helpers import (
+    is_no_match_evomap_output as _is_no_match_evomap_output,
+)
+from whaleclaw.agent.helpers.evomap_helpers import (
+    is_tasky_message_for_evomap as _is_tasky_message_for_evomap,
+)
+from whaleclaw.agent.helpers.evomap_helpers import (
+    parse_evomap_fetch_candidates as _parse_evomap_fetch_candidates,
+)
+from whaleclaw.agent.helpers.evomap_helpers import (
+    pick_top_evomap_candidates as _pick_top_evomap_candidates,
+)
+from whaleclaw.agent.helpers.evomap_helpers import (
+    recommended_evomap_signals as _recommended_evomap_signals,
+)
 from whaleclaw.agent.helpers.office_rules import (
     ABS_FILE_PATH_RE as _ABS_FILE_PATH_RE,
 )
@@ -82,73 +121,110 @@ from whaleclaw.agent.helpers.office_rules import (
     snapshot_round_artifacts as _snapshot_round_artifacts,
 )
 from whaleclaw.agent.helpers.office_rules import with_round_version_suffix
-from whaleclaw.agent.helpers.skill_lock import (
-    build_nano_banana_execution_system_message as _build_nano_banana_execution_system_message,
-)
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import (
     build_skill_lock_system_message as _build_skill_lock_system_message,
 )
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import (
     build_skill_param_guard_reply as _build_skill_param_guard_reply,
 )
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import (
     detect_assistant_name_update as _detect_assistant_name_update,
 )
-from whaleclaw.agent.helpers.skill_lock import (
-    detect_nano_banana_model_display as _detect_nano_banana_model_display,
-)
-from whaleclaw.agent.helpers.skill_lock import guarded_skills as _guarded_skills
-from whaleclaw.agent.helpers.skill_lock import (
-    is_nano_banana_activation_message as _is_nano_banana_activation_message,
-)
-from whaleclaw.agent.helpers.skill_lock import (
-    is_nano_banana_control_message as _is_nano_banana_control_message,
-)
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import guarded_skills as _guarded_skills
+from whaleclaw.agent.helpers.skill_helpers import (
     is_task_done_confirmation as _is_task_done_confirmation,
 )
-from whaleclaw.agent.helpers.skill_lock import (
-    load_saved_nano_banana_model_display as _load_saved_nano_banana_model_display,
-)
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import (
     looks_like_skill_activation_message as _looks_like_skill_activation_message,
 )
-from whaleclaw.agent.helpers.skill_lock import (
-    nano_banana_missing_required as _nano_banana_missing_required,
-)
-from whaleclaw.agent.helpers.skill_lock import normalize_for_match as _normalize_for_match
-from whaleclaw.agent.helpers.skill_lock import normalize_skill_ids as _normalize_skill_ids
-from whaleclaw.agent.helpers.skill_lock import parse_use_command as _parse_use_command
-from whaleclaw.agent.helpers.skill_lock import preview_text as _preview_text
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import normalize_for_match as _normalize_for_match
+from whaleclaw.agent.helpers.skill_helpers import normalize_skill_ids as _normalize_skill_ids
+from whaleclaw.agent.helpers.skill_helpers import parse_use_command as _parse_use_command
+from whaleclaw.agent.helpers.skill_helpers import preview_text as _preview_text
+from whaleclaw.agent.helpers.skill_helpers import (
     select_native_tool_names as _select_native_tool_names,
 )
-from whaleclaw.agent.helpers.skill_lock import skill_announcement as _skill_announcement
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import skill_announcement as _skill_announcement
+from whaleclaw.agent.helpers.skill_helpers import (
     skill_explicitly_mentioned as _skill_explicitly_mentioned,
 )
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import (
     skill_trigger_mentioned as _skill_trigger_mentioned,
 )
-from whaleclaw.agent.helpers.skill_lock import update_guard_state as _update_guard_state
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import (
+    is_api_key_only_message as _is_api_key_only_message,
+)
+from whaleclaw.agent.helpers.skill_helpers import (
+    persist_param_api_key as _persist_param_api_key,
+)
+from whaleclaw.agent.helpers.skill_helpers import update_guard_state as _update_guard_state
+from whaleclaw.agent.helpers.skill_helpers import (
     build_skill_queue_advance_message as _build_skill_queue_advance_message,
 )
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import (
     build_skill_queue_plan_messages as _build_skill_queue_plan_messages,
 )
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import (
     build_skill_queue_status_message as _build_skill_queue_status_message,
 )
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import (
     is_queue_advance_confirmation as _is_queue_advance_confirmation,
 )
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import (
     parse_skill_queue_plan as _parse_skill_queue_plan,
 )
-from whaleclaw.agent.helpers.skill_lock import (
+from whaleclaw.agent.helpers.skill_helpers import (
     skill_queue_has_next as _skill_queue_has_next,
 )
+from whaleclaw.agent.helpers.image_refs import (
+    append_image_reference_history as _append_image_reference_history,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    extract_input_image_paths_from_text as _extract_input_image_paths_from_text,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    fix_image_paths as _fix_image_paths,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    is_image_reference_lookup_message as _is_image_reference_lookup_message,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    load_images_from_paths as _load_images_from_paths,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    is_numbered_image_reference_edit_message as _is_numbered_image_reference_edit_message,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    message_may_need_prior_images as _message_may_need_prior_images,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    message_requests_image_edit as _message_requests_image_edit,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    message_requests_image_regenerate as _message_requests_image_regenerate,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    recover_last_input_images as _recover_last_input_images,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    recover_latest_generated_image as _recover_latest_generated_image,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    resolve_numbered_input_image_paths as _resolve_numbered_input_image_paths,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    resolve_relative_image_reference_path as _resolve_relative_image_reference_path,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    recover_recent_session_image_paths as _recover_recent_session_image_paths,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    skill_requires_images as _skill_requires_images,
+)
+from whaleclaw.agent.helpers.image_refs import (
+    strip_inline_image_markdown as _strip_inline_image_markdown,
+)
+from whaleclaw.skills.hooks import SkillHooks, get_all_hooks, get_skill_hooks
 from whaleclaw.agent.helpers.tool_execution import (
     can_auto_create_parent_for_failure,
     create_default_registry,
@@ -174,6 +250,7 @@ from whaleclaw.agent.helpers.tool_execution import (
     validate_tool_call_args as _validate_tool_call_args,
 )
 from whaleclaw.agent.helpers.tool_guards import (
+    MODEL_REPAIR_RETRY_LIMIT,
     ToolGuardState,
     apply_post_round_guards,
     apply_tool_result_guards,
@@ -185,9 +262,9 @@ from whaleclaw.config.schema import WhaleclawConfig
 from whaleclaw.providers.base import AgentResponse, ImageContent, Message, ToolCall
 from whaleclaw.providers.router import ModelRouter
 from whaleclaw.sessions.compressor import ContextCompressor
-from whaleclaw.sessions.context_window import RECENT_PROTECTED, ContextWindow
+from whaleclaw.sessions.context_window import RECENT_PROTECTED, ContextWindow, TrimResult
 from whaleclaw.sessions.manager import Session, SessionManager
-from whaleclaw.sessions.store import SessionStore
+from whaleclaw.sessions.store import SessionStore, SummaryRow
 from whaleclaw.skills.parser import Skill
 from whaleclaw.tools.base import ToolResult
 from whaleclaw.tools.registry import ToolRegistry
@@ -207,6 +284,28 @@ log = get_logger(__name__)
 
 OnRoundResult = Callable[[int, str], Awaitable[None]]
 
+
+class AgentDoneInfo:
+    """Metadata emitted when the agent loop completes."""
+
+    __slots__ = ("model", "input_tokens", "output_tokens", "llm_rounds")
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        input_tokens: int,
+        output_tokens: int,
+        llm_rounds: int,
+    ) -> None:
+        self.model = model
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.llm_rounds = llm_rounds
+
+
+OnAgentDone = Callable[[AgentDoneInfo], Awaitable[None]]
+
 _assembler = PromptAssembler()
 _context_window = ContextWindow()
 _compressor = ContextCompressor()
@@ -217,71 +316,6 @@ _EVOMAP_MAX_TOKENS = 1000
 _EXTRA_MEMORY_COMPRESS_TIMEOUT_SECONDS = 8
 _DEFAULT_ASSISTANT_NAME = "WhaleClaw"
 
-_IMG_MD_RE = re.compile(r"!\[([^\]]*)\]\((/[^)]+)\)")
-_ABS_IMAGE_PATH_RE = re.compile(
-    r"(/[^\s\"')]+?\.(?:png|jpg|jpeg|gif|webp))(?=[\s\"')]|$)",
-    re.IGNORECASE,
-)
-_IMAGE_REFERENCE_RE = re.compile(
-    r"(这张图|这张图片|这幅图|这幅图片|图里|图中|参考图|按这张|基于这张|用这张)",
-    re.IGNORECASE,
-)
-_NUMBERED_IMAGE_REFERENCE_RE = re.compile(
-    r"(?:图\s*[1-9一二三四五六七八九两]|第[一二三四五六七八九两123456789]+张图)",
-    re.IGNORECASE,
-)
-_IMAGE_EDIT_FOLLOWUP_RE = re.compile(
-    r"(改(?:成|下|一下)?|修改|调整|优化|增强|变得|变成|换成|把.+(?:改|变|改成|变成|换成)|"
-    r"让.+(?:改成|变成|换成)|"
-    r"加上|加个|加一(?:个|只)?|加只|添加|增加|补上|再来(?:个|只)?|放一(?:个|只)?)",
-    re.IGNORECASE,
-)
-_IMAGE_EDIT_SUBJECT_CONTINUATION_RE = re.compile(
-    r"^\s*(?:请)?(?:帮我)?(?:让|给)\s*(?:这|那|它|他|她)"
-    r"(?:只|个|头|名|位|条|匹|张|幅)?",
-    re.IGNORECASE,
-)
-_IMAGE_REGENERATE_RE = re.compile(
-    r"(重试|重做|重新生成|重生成|重新来|再来一版|再生成一次|再试一次|重画|这图不好看)",
-    re.IGNORECASE,
-)
-_NANO_BANANA_RATIO_CLAUSE_RE = re.compile(
-    r"[，,、;\s]*(?:图片)?(?:尺寸|比例|画幅|宽高比)"
-    r"(?:改成|改为|是|为|设为|设置为|调整为|调成|[:：])?\s*"
-    r"(?:\d{1,2}\s*:\s*\d{1,2}|\d{3,5}\s*[xX]\s*\d{3,5})",
-    re.IGNORECASE,
-)
-_NANO_BANANA_REGENERATE_PREFIX_RE = re.compile(
-    r"^\s*(?:请)?(?:帮我)?(?:再)?(?:重新生成|重生成|重试|再试一次|再生成一次|重新来|重做|重画)"
-    r"(?:一下|下)?[，,、:\s]*",
-    re.IGNORECASE,
-)
-_NANO_BANANA_MODEL_PREFIX_RE = re.compile(
-    r"^\s*(?:用|改用|切换到)?\s*(?:香蕉2|香蕉pro)\s*",
-    re.IGNORECASE,
-)
-_PREVIOUS_IMAGE_REF_PATTERNS: tuple[tuple[int, re.Pattern[str]], ...] = (
-    (2, re.compile(r"(?:再上一张|上上张|前前一张)图?", re.IGNORECASE)),
-    (1, re.compile(r"(?:上一张|前一张)图?", re.IGNORECASE)),
-    (0, re.compile(r"(?:当前这张|最新一张|这张图|这幅图)")),
-)
-_NUMBERED_IMAGE_TOKEN_RE = re.compile(
-    r"(?:图\s*([1-9])|第([123456789一二三四五六七八九两])张图)",
-    re.IGNORECASE,
-)
-_IMAGE_LOOKUP_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?:长啥样|什么样|是哪张|发(?:来)?看|看一下|看看|给我看)"),
-    re.compile(r"^(?:那)?(?:再)?(?:上[一二两]?张|前[一二两]?张|这张)呢[？?]?$"),
-)
-_MAX_IMAGE_REFERENCE_HISTORY = 6
-_NANO_BANANA_TEXT_TO_IMAGE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"(?:文生图|生图|出图|作画)", re.IGNORECASE),
-    re.compile(
-        r"(?:生成|做|做个|做张|画|来|给我|帮我)(?:一张|个|张)?(?:图|图片|海报|插画)",
-        re.IGNORECASE,
-    ),
-    re.compile(r"(?:这是一张|一张).+(?:的图|图片|海报|插画)", re.IGNORECASE),
-)
 _NON_SKILL_STEP_RE = re.compile(
     r"(?:做|做个|做一个|创建|新建|生成|制作|写)"
     r"(?:一个|个|一份|份)?"
@@ -293,49 +327,11 @@ _NON_SKILL_STEP_RE = re.compile(
     re.IGNORECASE,
 )
 
-_NANO_BANANA_NON_EXECUTION_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(
-        r"^\s*(?:你好|嗨|hi|hello|在吗|早上好|中午好|晚上好)\s*[!！,.。]*\s*$",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^\s*(?:谢谢|谢了|多谢|辛苦了|拜拜|再见|晚安)\s*[!！,.。]*\s*$",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^\s*(?:请)?(?:给我|给咱|给大家|来个|讲个|讲一个|说个|说一个)?"
-        r"(?:笑话|段子|故事|脑筋急转弯)(?:吧|呀|啊|呗)?\s*$",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"^\s*(?:聊聊|聊一聊|继续聊|继续说|解释一下|介绍一下|分析一下|总结一下|"
-        r"告诉我|回答我|帮我解释|帮我分析|帮我总结|怎么看|为什么|怎么|是什么)",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?:桌面截图|截个图|截图给我|屏幕截图|桌面|desktop|screenshot|截屏)",
-        re.IGNORECASE,
-    ),
-    re.compile(
-        r"(?:做个PPT|制作PPT|生成PPT|幻灯片|文档|表格|excel|word|pptx?|docx?|xlsx?)",
-        re.IGNORECASE,
-    ),
-)
-_NANO_BANANA_PROMPT_QUESTION_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"[?？]"),
-    re.compile(r"(?:什么|为何|为什么|怎么|如何|哪个|哪张|哪一张|是不是|是否|吗|呢)\s*$"),
-    re.compile(r"(?:什么样|长啥样|发来看看|给我看|看一下|看看)"),
-)
-_EVOMAP_LINE_RE = re.compile(r"^\s*-\s*([^:]+):\s*(.+?)\s*$")
 _VERSION_SUFFIX_RE = re.compile(r"_V\d+$", re.IGNORECASE)
 _COORDINATOR_ASK_RE = re.compile(
     r"(?:你要(?:我|什么)|需要你(?:提供|告诉|回复|回答|确认|选择)|"
     r"请(?:告诉|选择|提供|告知)我|"
     r"(?:按|用)(?:下面|以下)(?:模板|格式)(?:回|填|答))",
-)
-_EVOMAP_CHOICE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^\s*(?:选|选择)?\s*([ABCabc])\s*$"),
-    re.compile(r"^\s*(?:选|选择)?\s*([123])\s*$"),
 )
 _ASSISTANT_NAME_RESET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"恢复默认名字"),
@@ -394,41 +390,25 @@ _SKILL_ACTIVATION_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"(?:使用|调用|启动|启用|走|用).{0,24}(?:技能|skill)", re.IGNORECASE),
     re.compile(r"(?:技能|skill).{0,16}(?:文生图|图生图|处理|执行|联调)", re.IGNORECASE),
 )
-_MULTI_AGENT_CONFIRM_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(
-        r"^\s*(确认|确认开始|开始执行|开始多agent|开始多\s*agent|执行吧|开始吧)\s*$",
-        re.IGNORECASE,
-    ),
-    re.compile(r"^\s*/multi\s+go\s*$", re.IGNORECASE),
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    MULTI_AGENT_CANCEL_PATTERNS as _MULTI_AGENT_CANCEL_PATTERNS,
 )
-_MULTI_AGENT_CANCEL_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^\s*(取消|取消执行|先别执行|暂停|停止)\s*$", re.IGNORECASE),
-    re.compile(r"^\s*/multi\s+cancel\s*$", re.IGNORECASE),
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    MULTI_AGENT_CONFIRM_PATTERNS as _MULTI_AGENT_CONFIRM_PATTERNS,
 )
-_MULTI_AGENT_ROUNDS_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(
-        r"(?:改为|改成|设为|设置为|设置|调整为|改到)\s*(\d{1,2})\s*轮",
-        re.IGNORECASE,
-    ),
-    re.compile(r"^\s*(\d{1,2})\s*轮\s*$", re.IGNORECASE),
-    re.compile(r"^\s*/multi\s+rounds\s+(\d{1,2})\s*$", re.IGNORECASE),
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    MULTI_AGENT_DISCUSS_DONE_PATTERNS as _MULTI_AGENT_DISCUSS_DONE_PATTERNS,
 )
-_MULTI_AGENT_DISCUSS_DONE_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"^\s*(需求确认|确认需求|需求已确认|信息齐了|进入执行确认)\s*$"),
-    re.compile(r"^\s*/multi\s+ready\s*$", re.IGNORECASE),
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    MULTI_AGENT_ROUNDS_PATTERNS as _MULTI_AGENT_ROUNDS_PATTERNS,
 )
-_MULTI_AGENT_SCENARIO_LABELS: dict[str, str] = {
-    "product_design": "产品设计",
-    "content_creation": "内容创作",
-    "software_development": "软件开发",
-    "data_analysis_decision": "数据分析决策",
-    "scientific_research": "科研",
-    "intelligent_assistant": "智能助理",
-    "workflow_automation": "自动化工作流",
-}
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    MULTI_AGENT_SCENARIO_LABELS,
+)
+
+_MULTI_AGENT_SCENARIO_LABELS = MULTI_AGENT_SCENARIO_LABELS
 
 # Public aliases for cross-module reuse.
-MULTI_AGENT_SCENARIO_LABELS = _MULTI_AGENT_SCENARIO_LABELS
 ABS_FILE_PATH_RE = _ABS_FILE_PATH_RE
 NON_DELIVERY_EXTS = _NON_DELIVERY_EXTS
 OFFICE_PATH_RE = _OFFICE_PATH_RE
@@ -454,37 +434,6 @@ _TOOL_HINTS: dict[str, str] = {
     "memory_list": "查看长期记忆",
     "skill": "查找技能",
 }
-
-def _is_evomap_enabled(config: WhaleclawConfig) -> bool:
-    plugins_cfg = getattr(config, "plugins", None)
-    if not isinstance(plugins_cfg, dict):
-        return False
-    evomap_cfg_raw: object = plugins_cfg.get("evomap", None)  # pyright: ignore[reportUnknownVariableType, reportUnknownMemberType]
-    if not isinstance(evomap_cfg_raw, dict):
-        return False
-    evomap_cfg: dict[str, object] = evomap_cfg_raw  # pyright: ignore[reportAssignmentType, reportUnknownVariableType]
-    return bool(evomap_cfg.get("enabled", False))
-
-
-def _is_evomap_status_question(text: str) -> bool:
-    q = text.lower().strip()
-    if not q:
-        return False
-    if "evomap" not in q and "evo map" not in q:
-        return False
-    status_hints = (
-        "开着",
-        "开启",
-        "启用",
-        "打开",
-        "关闭",
-        "状态",
-        "on",
-        "off",
-        "enabled",
-    )
-    return any(h in q for h in status_hints)
-
 
 def _build_memory_system_message(recalled: str) -> Message:
     """Wrap recalled memory as durable preference/fact context."""
@@ -536,40 +485,6 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
     return text[:char_cap]
 
 
-def _dedup_consecutive_errors(
-    conversation: list[Message],
-    tool_name: str,
-    current_error: str,
-) -> None:
-    """回溯 conversation，把与当前错误相似的连续历史 tool 错误替换为精简摘要。
-
-    相似度判定：取错误文本前 120 字符比较（忽略时间戳/路径等细节差异）。
-    只替换 *之前* 的消息内容，当前这条不受影响（它还没 append）。
-    """
-    if not conversation or not current_error:
-        return
-    sig = current_error[:120]
-    replaced = 0
-    for msg in reversed(conversation):
-        content = msg.content or ""
-        if msg.role == "tool" or (msg.role == "user" and content.startswith("[工具 ")):
-            if "[ERROR]" not in content and "[重复错误" not in content:
-                break
-            prev_sig = content[:120] if msg.role == "tool" else content[content.find("\n") + 1:][:120]
-            if prev_sig == sig:
-                short = f"[重复错误，与下一条相同，已省略] 工具: {tool_name}"
-                msg.content = short
-                replaced += 1
-            else:
-                break
-        elif msg.role == "assistant":
-            continue
-        else:
-            break
-    if replaced:
-        log.debug("agent.dedup_errors", tool=tool_name, replaced=replaced)
-
-
 async def _compress_external_memory_with_llm(
     *,
     router: ModelRouter,
@@ -599,6 +514,13 @@ async def _compress_external_memory_with_llm(
     if _est_tokens(out) <= max_tokens:
         return out
     return _truncate_to_tokens(out, max_tokens)
+
+
+async def _load_session_summaries_typed(
+    store: SessionStore,
+    session_id: str,
+) -> list[SummaryRow]:
+    return await store.get_summaries(session_id)
 
 
 def _merge_recall_blocks(profile: str, raw: str) -> str:
@@ -684,227 +606,6 @@ async def _llm_judge_task_phase(
     return "EDITING"
 
 
-def _is_tasky_message_for_evomap(text: str) -> bool:
-    low = _normalize_for_match(text)
-    if not low:
-        return False
-    keys = (
-        "做",
-        "制作",
-        "生成",
-        "写",
-        "整理",
-        "设计",
-        "计划",
-        "PPT",
-        "ppt",
-        "幻灯片",
-        "演示文稿",
-        "报告",
-        "文档",
-        "方案",
-        "简历",
-        "海报",
-        "脚本",
-        "代码",
-        "页面",
-        "表格",
-        "excel",
-        "xlsx",
-        "word",
-        "docx",
-        "evomap",
-        "evo map",
-        "方案库",
-        "协作经验",
-    )
-    return any(k in low for k in keys)
-
-
-def _infer_task_kind(text: str) -> str:
-    low = text.lower()
-    if any(k in low for k in ("ppt", "幻灯片", "演示文稿", "slides", "deck")):
-        return "ppt"
-    if any(k in low for k in ("网页", "网站", "html", "web", "landing page", "前端")):
-        return "web"
-    if any(k in low for k in ("检索", "汇总", "调研", "信息", "collect", "research", "summarize")):
-        return "research"
-    return "general"
-
-
-def _extract_topic_terms(text: str, *, limit: int = 2) -> list[str]:
-    low = _normalize_for_match(text)
-    stop = {
-        "做",
-        "制作",
-        "生成",
-        "创建",
-        "一个",
-        "关于",
-        "给我",
-        "帮我",
-        "ppt",
-        "网页",
-        "网站",
-        "html",
-        "web",
-        "方案",
-        "检索",
-        "汇总",
-        "信息",
-        "today",
-        "todays",
-        "today's",
-    }
-    terms: list[str] = []
-    for t in re.findall(r"[\w\u4e00-\u9fff]{2,8}", low):
-        if t in stop:
-            continue
-        if t not in terms:
-            terms.append(t)
-        if len(terms) >= max(1, limit):
-            break
-    return terms
-
-
-def _recommended_evomap_signals(text: str) -> str:  # pyright: ignore[reportUnusedFunction]
-    kind = _infer_task_kind(text)
-    if kind == "ppt":
-        base = [
-            "ppt",
-            "presentation",
-            "slides",
-            "storyline",
-            "deck structure",
-            "visual layout",
-            "python-pptx",
-        ]
-    elif kind == "web":
-        base = [
-            "web page",
-            "html",
-            "css",
-            "frontend",
-            "responsive layout",
-            "content structure",
-        ]
-    elif kind == "research":
-        base = [
-            "information retrieval",
-            "multi-source collection",
-            "source validation",
-            "structured summary",
-            "fact-check",
-        ]
-    else:
-        base = [
-            "workflow",
-            "execution plan",
-            "quality checklist",
-        ]
-    return ",".join(base + _extract_topic_terms(text, limit=2))
-
-
-def _extra_memory_has_evomap_hint(extra_memory: str) -> bool:
-    text = extra_memory.strip()
-    if not text:
-        return False
-    return "EvoMap 协作经验候选" in text
-
-
-def _is_no_match_evomap_output(result: ToolResult) -> bool:
-    if not result.success:
-        return False
-    out = (result.output or "").strip()
-    if not out:
-        return True
-    hints = ("未找到匹配方案", "暂无可用任务", "无已认领任务")
-    return any(h in out for h in hints)
-
-
-def _build_evomap_first_system_message() -> Message:
-    return Message(
-        role="system",
-        content=(
-            "执行策略：本轮是流程任务，优先复用 EvoMap 成功经验。\n"
-            "1) 必须先调用 evomap_fetch 获取经验候选；\n"
-            "2) 只有当 evomap_fetch 无命中或失败时，才可调用 browser；\n"
-            "3) 若 evomap_fetch 命中，请先按命中方案执行。"
-        ),
-    )
-
-
-def _extract_evomap_choice_index(text: str, options_count: int) -> int | None:
-    if options_count <= 0:
-        return None
-    raw = text.strip()
-    if not raw:
-        return None
-    for p in _EVOMAP_CHOICE_PATTERNS:
-        m = p.match(raw)
-        if not m:
-            continue
-        token = m.group(1).strip().upper()
-        if token in {"A", "B", "C"}:
-            idx = ord(token) - ord("A")
-        elif token.isdigit():
-            idx = int(token) - 1
-        else:
-            return None
-        if 0 <= idx < options_count:
-            return idx
-    return None
-
-
-def _parse_evomap_fetch_candidates(output: str) -> list[tuple[str, str]]:
-    lines = [ln.strip() for ln in output.splitlines() if ln.strip()]
-    items: list[tuple[str, str]] = []
-    for ln in lines:
-        m = _EVOMAP_LINE_RE.match(ln)
-        if not m:
-            continue
-        aid = m.group(1).strip()
-        summary = m.group(2).strip()
-        if not aid and not summary:
-            continue
-        items.append((aid, summary))
-    return items
-
-
-def _pick_top_evomap_candidates(
-    user_message: str,
-    candidates: list[tuple[str, str]],
-    *,
-    limit: int = 3,
-) -> list[tuple[str, str]]:
-    query = _normalize_for_match(user_message)
-    terms = {t for t in re.findall(r"[\w\u4e00-\u9fff]{2,}", query)}
-
-    scored: list[tuple[int, tuple[str, str]]] = []
-    for item in candidates:
-        aid, summary = item
-        hay = _normalize_for_match(f"{aid} {summary}")
-        score = 0
-        for t in terms:
-            if t in hay:
-                score += 1
-        scored.append((score, item))
-
-    scored.sort(key=lambda x: (-x[0], x[1][0]))
-    return [item for _score, item in scored[: max(1, limit)]]
-
-
-def _build_evomap_choice_prompt(candidates: list[tuple[str, str]]) -> str:
-    labels = ("A", "B", "C")
-    lines = ["EvoMap 命中了多条可用方案，请先选一个我再执行："]
-    for idx, item in enumerate(candidates[:3]):
-        aid, summary = item
-        label = labels[idx]
-        lines.append(f"{label}. {aid} — {summary}")
-    lines.append("请直接回复：选A / 选B / 选C")
-    return "\n".join(lines)
-
-
 def _schedule_memory_organizer_task(
     session_id: str,
     *,
@@ -961,73 +662,54 @@ def _make_plan_hint(tool_names: list[str], user_msg: str) -> str:
     return f"好的，我来处理。正在{plan}…\n\n"
 
 
-def _fix_image_paths(text: str, known_paths: list[str] | None = None) -> str:
-    """Validate image paths in markdown; fix fabricated paths using known real ones."""
-    from pathlib import Path
-
-    unused_real = list(known_paths or [])
-
-    def _replace(m: re.Match[str]) -> str:
-        alt, raw_path = m.group(1), m.group(2)
-        fp = Path(raw_path)
-        if fp.is_file():
-            return m.group(0)
-
-        # Priority 1: match from tool-returned real paths (by hash or order)
-        for i, real in enumerate(unused_real):
-            rp = Path(real)
-            if rp.is_file():
-                unused_real.pop(i)
-                log.info("fix_image_path.known", original=raw_path, found=real)
-                return f"![{alt}]({real})"
-
-        # Priority 2: fuzzy match by hash suffix
-        stem = fp.stem
-        hash_m = re.search(r"_([0-9a-f]{6,8})$", stem)
-        if hash_m and fp.parent.is_dir():
-            suffix = hash_m.group(0) + fp.suffix
-            for candidate in fp.parent.iterdir():
-                if candidate.name.endswith(suffix) and candidate.is_file():
-                    log.info("fix_image_path.fuzzy", original=raw_path, found=str(candidate))
-                    return f"![{alt}]({candidate})"
-
-        # Priority 3: most recent file in same directory
-        if fp.parent.is_dir():
-            files = sorted(
-                (f for f in fp.parent.iterdir() if f.is_file() and f.suffix == fp.suffix),
-                key=lambda f: f.stat().st_mtime,
-                reverse=True,
-            )
-            if files:
-                best = files[0]
-                log.info("fix_image_path.recent", original=raw_path, found=str(best))
-                return f"![{alt}]({best})"
-
-        log.warning("fix_image_path.removed", path=raw_path)
-        return f"[图片未找到: {alt}]"
-
-    return _IMG_MD_RE.sub(_replace, text)
+_CN_DIGIT_MAP: dict[str, str] = {
+    "零": "0", "一": "1", "二": "2", "三": "3", "四": "4",
+    "五": "5", "六": "6", "七": "7", "八": "8", "九": "9",
+    "十": "10", "两": "2",
+}
+_CN_COMPOUND_TEN_RE = re.compile(r"十([一二三四五六七八九])")
+_CN_TENS_RE = re.compile(r"([二三四五六七八九])十")
 
 
-def _message_may_need_prior_images(message: str) -> bool:
-    """Detect whether the user is referring to a previously uploaded image."""
-    return bool(_IMAGE_REFERENCE_RE.search(message))
+def _normalize_cn_time(text: str) -> str:
+    """把中文数字时间表达归一化为阿拉伯数字，方便正则匹配。"""
+    text = _CN_COMPOUND_TEN_RE.sub(lambda m: "1" + _CN_DIGIT_MAP[m.group(1)], text)
+    text = _CN_TENS_RE.sub(lambda m: _CN_DIGIT_MAP[m.group(1)] + "0", text)
+    text = text.replace("十", "10")
+    for cn, ar in _CN_DIGIT_MAP.items():
+        text = text.replace(cn, ar)
+    return text
 
 
-def _message_requests_image_edit(message: str) -> bool:
-    """Detect edit follow-ups that should continue from the latest output image."""
-    if _message_may_need_prior_images(message):
+_DEFERRED_TASK_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\d+\s*(?:分钟|小时|秒|min|hour|h)\s*(?:后|之后|以后)"),
+    re.compile(r"(?:每天|每日|每周|每月|每隔)\s*\d"),
+    re.compile(
+        r"(?:(?:今天|明天|后天)?\s*(?:今晚|明早|早上|上午|中午|下午|晚上|凌晨|傍晚)\s*)?"
+        r"\d{1,2}\s*[点时:：]\s*(?:半|\d{0,2})\s*(?:分钟?)?"
+        r"(?:\s*的时候|\s*时候)?"
+        r"\s*(?:去|做|执行|运行|发布|发送|提醒|推送|搜索|搜|找|画|写|打开|关闭|启动|停止|用|使用|叫)"
+    ),
+    re.compile(
+        r"(?:每天|每日|每周|每月)\s*(?:早上|上午|中午|下午|晚上|凌晨|傍晚)?"
+        r"\s*\d{1,2}\s*[点时:：]"
+    ),
+)
+_DEFERRED_SCHEDULE_KW = re.compile(r"(?:定时|定期)\s*(?:执行|运行|发布|发送|提醒|推送)")
+_QUESTION_TAIL_RE = re.compile(r"[吗呢？\?]\s*$")
+_QUESTION_PREFIX_RE = re.compile(r"(?:有没有|是否|是不是|有做|查看|查询|查下)")
+
+
+def _is_deferred_task_intent(message: str) -> bool:
+    """检测用户消息是否是定时/周期任务意图，而非立即执行。"""
+    normalized = _normalize_cn_time(message)
+    if any(p.search(normalized) for p in _DEFERRED_TASK_PATTERNS):
         return True
-    if _NUMBERED_IMAGE_REFERENCE_RE.search(message):
-        return True
-    if _IMAGE_EDIT_SUBJECT_CONTINUATION_RE.search(message):
-        return True
-    return bool(_IMAGE_EDIT_FOLLOWUP_RE.search(message))
-
-
-def _message_requests_image_regenerate(message: str) -> bool:
-    """Detect reruns that should go back to the original input image set."""
-    return bool(_IMAGE_REGENERATE_RE.search(message))
+    if not _DEFERRED_SCHEDULE_KW.search(normalized):
+        return False
+    if _QUESTION_TAIL_RE.search(normalized) or _QUESTION_PREFIX_RE.search(normalized):
+        return False
+    return True
 
 
 def _is_skill_lock_status_question(message: str) -> bool:
@@ -1042,14 +724,16 @@ def _extract_locked_skill_ids_from_metadata(metadata: object) -> list[str]:
     """Normalize locked skill ids from arbitrary session metadata."""
     if not isinstance(metadata, dict):
         return []
-    raw_locked = metadata.get("locked_skill_ids")
+    metadata_dict = cast(dict[object, object], metadata)
+    raw_locked = metadata_dict.get("locked_skill_ids")
     if isinstance(raw_locked, list):
+        locked_items = cast(list[object], raw_locked)
         return [
-            str(item).strip().lower()
-            for item in raw_locked
-            if isinstance(item, str) and str(item).strip()
+            item.strip().lower()
+            for item in locked_items
+            if isinstance(item, str) and item.strip()
         ]
-    raw_forced = metadata.get("forced_skill_id")
+    raw_forced = metadata_dict.get("forced_skill_id")
     if isinstance(raw_forced, str) and raw_forced.strip():
         return [raw_forced.strip().lower()]
     return []
@@ -1063,254 +747,19 @@ def _build_skill_lock_status_reply(session: Session | None) -> str:
     if not locked_skill_ids:
         return "当前没有技能锁定。"
     current_skills = "、".join(locked_skill_ids)
-    if "nano-banana-image-t8" in locked_skill_ids:
-        model_display = _resolve_nano_banana_model_display(session)
-        return (
-            f"现在锁定在技能：{current_skills}。\n"
-            f"当前本轮模型：{model_display}。\n"
-            "要解除锁定，回复“任务完成”即可。"
-        )
-    return (
-        f"现在锁定在技能：{current_skills}。\n"
-        "要解除锁定，回复“任务完成”即可。"
-    )
-
-
-def _skill_requires_images(skills: list[Skill]) -> bool:
-    """Return whether any active skill explicitly requires image inputs."""
-    for skill in skills:
-        guard = skill.param_guard
-        if guard is None or not guard.enabled:
-            continue
-        for param in guard.params:
-            if param.type.strip().lower() == "images":
-                return True
-    return False
-
-
-def _mime_from_image_path(path: Path) -> str:
-    """Infer an image mime type from the local file suffix."""
-    suffix = path.suffix.lower()
-    if suffix == ".png":
-        return "image/png"
-    if suffix == ".webp":
-        return "image/webp"
-    if suffix == ".gif":
-        return "image/gif"
-    return "image/jpeg"
-
-
-def _recover_recent_session_images(
-    session: Session | None,
-    *,
-    limit: int = 4,
-) -> list[ImageContent]:
-    """Reload recent local image references from prior user messages."""
-    paths = _recover_recent_session_image_paths(session, limit=limit)
-    recovered: list[ImageContent] = []
-    for raw_path in paths:
-        path = Path(raw_path).expanduser()
-        try:
-            data = path.read_bytes()
-        except OSError:
-            continue
-        recovered.append(ImageContent(
-            mime=_mime_from_image_path(path),
-            data=base64.b64encode(data).decode("ascii"),
-        ))
-    return recovered
-
-
-def _load_images_from_paths(paths: list[str]) -> list[ImageContent]:
-    """Read local image paths into inline message payloads."""
-    recovered: list[ImageContent] = []
-    for raw_path in paths:
-        path = Path(raw_path).expanduser()
-        try:
-            data = path.read_bytes()
-        except OSError:
-            continue
-        recovered.append(ImageContent(
-            mime=_mime_from_image_path(path),
-            data=base64.b64encode(data).decode("ascii"),
-        ))
-    return recovered
-
-
-def _recover_latest_generated_image(session: Session | None) -> list[ImageContent]:
-    """Return only the latest generated image for edit-followup turns."""
-    if session is None:
-        return []
-    metadata = session.metadata if isinstance(session.metadata, dict) else {}
-    latest_generated = str(metadata.get("last_generated_image_path", "")).strip()
-    if not latest_generated:
-        return []
-    return _load_images_from_paths([latest_generated])
-
-
-def _append_image_reference_history(metadata: dict[str, object], paths: list[str]) -> bool:
-    raw_history = metadata.get("image_reference_history", [])
-    history: list[str] = []
-    if isinstance(raw_history, list):
-        history = [str(item).strip() for item in raw_history if str(item).strip()]
-    changed = False
-    for raw_path in paths:
-        path = Path(raw_path).expanduser()
-        if not path.is_file():
-            continue
-        normalized = str(path)
-        if normalized in history:
-            history.remove(normalized)
-        history.insert(0, normalized)
-        changed = True
-    if len(history) > _MAX_IMAGE_REFERENCE_HISTORY:
-        history = history[:_MAX_IMAGE_REFERENCE_HISTORY]
-        changed = True
-    if changed:
-        metadata["image_reference_history"] = history
-    return changed
-
-
-def _recover_last_input_images(session: Session | None) -> list[ImageContent]:
-    """Return the last explicit input image set for regenerate-followup turns."""
-    if session is None:
-        return []
-    metadata = session.metadata if isinstance(session.metadata, dict) else {}
-    raw_paths = metadata.get("last_input_image_paths", [])
-    if not isinstance(raw_paths, list):
-        return []
-    paths = [str(item).strip() for item in raw_paths if str(item).strip()]
-    return _load_images_from_paths(paths)
-
-
-def _recover_recent_session_image_paths(
-    session: Session | None,
-    *,
-    limit: int = 4,
-) -> list[str]:
-    """Collect recent valid local image paths, preferring latest generated outputs."""
-    if session is None:
-        return []
-
-    recovered: list[str] = []
-    seen_paths: set[str] = set()
-
-    metadata = session.metadata if isinstance(session.metadata, dict) else {}
-    history_raw = metadata.get("image_reference_history", [])
-    if isinstance(history_raw, list):
-        for item in history_raw:
-            path = Path(str(item).strip()).expanduser()
-            resolved = str(path)
-            if resolved in seen_paths or not path.is_file():
-                continue
-            seen_paths.add(resolved)
-            recovered.append(resolved)
-            if len(recovered) >= limit:
-                return recovered
-    latest_generated = str(metadata.get("last_generated_image_path", "")).strip()
-    if latest_generated:
-        path = Path(latest_generated).expanduser()
-        if path.is_file():
-            seen_paths.add(str(path))
-            recovered.append(str(path))
-            if len(recovered) >= limit:
-                return recovered
-
-    for msg in reversed(session.messages):
-        if msg.role not in {"user", "assistant"} or not msg.content:
-            continue
-        markdown_paths = [match.group(2).strip() for match in _IMG_MD_RE.finditer(msg.content)]
-        plain_paths = [match.group(1).strip() for match in _ABS_IMAGE_PATH_RE.finditer(msg.content)]
-        for raw_path in [*markdown_paths, *plain_paths]:
-            path = Path(raw_path).expanduser()
-            resolved = str(path)
-            if resolved in seen_paths or not path.is_file():
-                continue
-            seen_paths.add(resolved)
-            recovered.append(resolved)
-            if len(recovered) >= limit:
-                return recovered
-    return recovered
-
-
-def _resolve_relative_image_reference_index(message: str) -> int | None:
-    for index, pattern in _PREVIOUS_IMAGE_REF_PATTERNS:
-        if pattern.search(message):
-            return index
-    return None
-
-
-def _number_token_to_index(token: str) -> int | None:
-    normalized = token.strip()
-    if not normalized:
-        return None
-    if normalized.isdigit():
-        value = int(normalized)
-        return value - 1 if value > 0 else None
-    zh_map = {
-        "一": 0,
-        "二": 1,
-        "两": 1,
-        "三": 2,
-        "四": 3,
-        "五": 4,
-        "六": 5,
-        "七": 6,
-        "八": 7,
-        "九": 8,
-    }
-    return zh_map.get(normalized)
-
-
-def _extract_numbered_image_reference_indexes(message: str) -> list[int]:
-    indexes: list[int] = []
-    seen: set[int] = set()
-    for match in _NUMBERED_IMAGE_TOKEN_RE.finditer(message):
-        token = match.group(1) or match.group(2) or ""
-        index = _number_token_to_index(token)
-        if index is None or index in seen:
-            continue
-        seen.add(index)
-        indexes.append(index)
-    return indexes
-
-
-def _resolve_numbered_input_image_paths(
-    session: Session | None,
-    message: str,
-) -> list[str]:
-    indexes = _extract_numbered_image_reference_indexes(message)
-    if not indexes:
-        return []
-    candidates = _recover_last_input_image_paths(session)
-    if not candidates:
-        return []
-    resolved: list[str] = []
-    for index in indexes:
-        if 0 <= index < len(candidates):
-            resolved.append(candidates[index])
-    return resolved
-
-
-def _resolve_relative_image_reference_path(
-    session: Session | None,
-    message: str,
-) -> str:
-    ref_index = _resolve_relative_image_reference_index(message)
-    if ref_index is None:
-        return ""
-    history = _recover_recent_session_image_paths(session, limit=max(4, ref_index + 1))
-    if ref_index >= len(history):
-        return ""
-    return history[ref_index]
-
-
-def _is_image_reference_lookup_message(message: str) -> bool:
-    if _is_nano_banana_execution_request(message=message, has_new_input_images=False):
-        return False
-    if _resolve_relative_image_reference_index(message) is None:
-        return False
-    return any(pattern.search(message) for pattern in _IMAGE_LOOKUP_PATTERNS)
+    extra_parts: list[str] = []
+    locked_skills = _assembler.route_skills("", forced_skill_ids=locked_skill_ids)
+    for skill in locked_skills:
+        hooks = get_skill_hooks(skill)
+        if hooks is not None:
+            extra = hooks.build_lock_status_extra(session)
+            if extra:
+                extra_parts.append(extra)
+    base = f"现在锁定在技能：{current_skills}。"
+    if extra_parts:
+        base += "\n" + "\n".join(extra_parts)
+    base += "\n要解除锁定，回复“任务完成”即可。"
+    return base
 
 
 def _raw_skill_trigger_mentioned(skill: Skill, text: str) -> bool:
@@ -1328,13 +777,6 @@ def _raw_skill_trigger_mentioned(skill: Skill, text: str) -> bool:
     return False
 
 
-def _is_numbered_image_reference_edit_message(text: str) -> bool:
-    """Return whether the message is describing an edit across numbered image refs."""
-    if not _NUMBERED_IMAGE_REFERENCE_RE.search(text):
-        return False
-    return _message_requests_image_edit(text)
-
-
 def _lockable_skill_ids(skills: list[Skill]) -> list[str]:
     return _normalize_skill_ids([
         skill for skill in skills
@@ -1342,633 +784,102 @@ def _lockable_skill_ids(skills: list[Skill]) -> list[str]:
     ])
 
 
-def _looks_like_nano_banana_prompt_text(message: str) -> bool:
-    stripped = message.strip()
-    if not stripped:
-        return False
-    if any(pattern.search(stripped) for pattern in _NANO_BANANA_PROMPT_QUESTION_PATTERNS):
-        return False
-    if any(pattern.search(stripped) for pattern in _NANO_BANANA_NON_EXECUTION_PATTERNS):
-        return False
-    compact = re.sub(r"[\s，,。.!！;；:：、】【（）()\"'“”‘’]+", "", stripped)
-    if len(compact) < 6:
-        return False
-    return not bool(
-        re.search(r"(?:技能|skill|模型|api|key|路径|网址|链接|PPT|ppt|文档|表格)", stripped)
-    )
-
-
-def _extract_input_image_paths_from_text(
-    text: str,
-    *,
-    limit: int = 8,
-) -> list[str]:
-    """Extract unique local image paths from the current user message text."""
-    extracted: list[str] = []
-    seen_paths: set[str] = set()
-    markdown_paths = [match.group(2).strip() for match in _IMG_MD_RE.finditer(text)]
-    plain_paths = [match.group(1).strip() for match in _ABS_IMAGE_PATH_RE.finditer(text)]
-    for raw_path in [*markdown_paths, *plain_paths]:
-        path = Path(raw_path).expanduser()
-        resolved = str(path)
-        if resolved in seen_paths or not path.is_file():
-            continue
-        seen_paths.add(resolved)
-        extracted.append(resolved)
-        if len(extracted) >= limit:
-            break
-    return extracted
-
-
-def _strip_inline_image_markdown(text: str) -> str:
-    """Remove appended local image markdown from a user prompt string."""
-    stripped = _IMG_MD_RE.sub("", text)
-    stripped = _ABS_IMAGE_PATH_RE.sub("", stripped)
-    stripped = stripped.replace("(用户发送了图片)", "")
-    return stripped.strip()
-
-
-def _clean_nano_banana_prompt_delta(message: str) -> str:
-    cleaned = _strip_inline_image_markdown(message).strip()
-    if not cleaned:
-        return ""
-    cleaned = _NANO_BANANA_MODEL_PREFIX_RE.sub("", cleaned)
-    cleaned = _NANO_BANANA_REGENERATE_PREFIX_RE.sub("", cleaned)
-    cleaned = _NANO_BANANA_RATIO_CLAUSE_RE.sub("", cleaned)
-    cleaned = re.sub(r"^[，,、；;：:\s]+", "", cleaned)
-    cleaned = re.sub(r"[，,、；;：:\s]+$", "", cleaned)
-    return cleaned.strip()
-
-
-def _merge_nano_banana_prompt(
-    *,
-    previous_prompt: str,
-    message: str,
-    regenerate: bool,
-    image_edit: bool,
-) -> str:
-    previous = _strip_inline_image_markdown(previous_prompt).strip()
-    delta = _clean_nano_banana_prompt_delta(message)
-    if not previous:
-        return delta
-    if not delta:
-        return previous
-    if delta in previous:
-        return previous
-    if regenerate or image_edit:
-        return (
-            f"{previous}\n\n"
-            "在保留原始主题、主体和核心场景设定的前提下，按以下要求重新生成或修改："
-            f"{delta}"
-        )
-    return delta
-
-
-def _recover_latest_generated_image_path(session: Session | None) -> str:
-    if session is None:
-        return ""
-    metadata = session.metadata if isinstance(session.metadata, dict) else {}
-    latest_generated = str(metadata.get("last_generated_image_path", "")).strip()
-    path = Path(latest_generated).expanduser()
-    if latest_generated and path.is_file():
-        return str(path)
-    return ""
-
-
-def _recover_last_input_image_paths(session: Session | None) -> list[str]:
-    if session is None:
-        return []
-    metadata = session.metadata if isinstance(session.metadata, dict) else {}
-    raw_paths = metadata.get("last_input_image_paths", [])
-    if not isinstance(raw_paths, list):
-        return []
-    output: list[str] = []
-    for item in raw_paths:
-        path = Path(str(item).strip()).expanduser()
-        if path.is_file():
-            output.append(str(path))
-    return output
-
-
-def _recover_last_nano_banana_mode(session: Session | None) -> str:
-    if session is None:
-        return ""
-    metadata = session.metadata if isinstance(session.metadata, dict) else {}
-    raw_mode = str(metadata.get("last_nano_banana_mode", "")).strip().lower()
-    if raw_mode in {"text", "edit"}:
-        return raw_mode
-    state_map_raw = metadata.get("skill_param_state", {})
-    if not isinstance(state_map_raw, dict):
-        return ""
-    nano_state_raw = state_map_raw.get("nano-banana-image-t8", {})
-    if not isinstance(nano_state_raw, dict):
-        return ""
-    state_mode = str(nano_state_raw.get("__last_mode__", "")).strip().lower()
-    if state_mode in {"text", "edit"}:
-        return state_mode
-    return ""
-
-
-def _resolve_nano_banana_model_display(session: Session | None) -> str:
-    default_model = _load_saved_nano_banana_model_display()
-    if session is None:
-        return default_model
-    metadata = session.metadata if isinstance(session.metadata, dict) else {}
-    recent_model = str(metadata.get("last_nano_banana_model_display", "")).strip()
-    if recent_model in {"香蕉2", "香蕉pro"}:
-        return recent_model
-    state_map_raw = metadata.get("skill_param_state", {})
-    if not isinstance(state_map_raw, dict):
-        return default_model
-    nano_state_raw = state_map_raw.get("nano-banana-image-t8", {})
-    if not isinstance(nano_state_raw, dict):
-        return default_model
-    state_model = str(nano_state_raw.get("__model_display__", "")).strip()
-    if state_model in {"香蕉2", "香蕉pro"}:
-        return state_model
-    return default_model
-
-
-def _resolve_nano_banana_input_paths(
-    llm_message: str,
-    session: Session | None,
-) -> list[str]:
-    """Resolve the input image paths for a nano-banana execution turn."""
-    explicit_paths = _extract_input_image_paths_from_text(llm_message)
-    if explicit_paths:
-        return explicit_paths
-    # 用户明确要求文生图时，直接返回空（text 模式），
-    # 不让后面的 edit 误判覆盖意图。
-    if any(p.search(llm_message) for p in _NANO_BANANA_TEXT_TO_IMAGE_PATTERNS):
-        return []
-    numbered_paths = _resolve_numbered_input_image_paths(session, llm_message)
-    if numbered_paths:
-        return numbered_paths
-    relative_path = _resolve_relative_image_reference_path(session, llm_message)
-    if relative_path:
-        return [relative_path]
-    if _message_requests_image_regenerate(llm_message):
-        if _recover_last_nano_banana_mode(session) == "text":
-            return []
-        return _recover_last_input_image_paths(session)
-    if _message_requests_image_edit(llm_message):
-        latest_generated = _recover_latest_generated_image_path(session)
-        if latest_generated:
-            return [latest_generated]
-        return _recover_last_input_image_paths(session)
-    # 上一次是 edit 模式且有生成图片时，追加修改类消息沿用 edit 模式
-    if session is not None and _recover_last_nano_banana_mode(session) == "edit":
-        latest_generated = _recover_latest_generated_image_path(session)
-        if latest_generated:
-            return [latest_generated]
-    return []
-
-
-def _is_nano_banana_execution_request(
-    *,
-    message: str,
-    has_new_input_images: bool,
-) -> bool:
-    stripped = message.strip()
-    if not stripped:
-        return has_new_input_images
-    if has_new_input_images:
-        return True
-    if _is_nano_banana_control_message(stripped) and not _message_requests_image_regenerate(stripped):
-        return False
-    if _is_task_done_confirmation(stripped, task_done_patterns=_TASK_DONE_PATTERNS):
-        return False
-    if any(pattern.search(stripped) for pattern in _NANO_BANANA_NON_EXECUTION_PATTERNS):
-        return False
-    if (
-        any(pattern.search(stripped) for pattern in _NANO_BANANA_PROMPT_QUESTION_PATTERNS)
-        and not _message_requests_image_regenerate(stripped)
-        and not any(pattern.search(stripped) for pattern in _NANO_BANANA_TEXT_TO_IMAGE_PATTERNS)
-        and not _IMAGE_EDIT_FOLLOWUP_RE.search(stripped)
-    ):
-        return False
-    if _message_requests_image_regenerate(stripped):
-        return True
-    if _message_requests_image_edit(stripped):
-        return True
-    if any(pattern.search(stripped) for pattern in _NANO_BANANA_TEXT_TO_IMAGE_PATTERNS):
-        return True
-    if _is_image_generation_request(stripped):
-        return True
-    if _looks_like_nano_banana_prompt_text(stripped):
-        return True
-    return True
-
-
-def _build_nano_banana_command(
-    *,
-    mode: str,
-    model_display: str,
-    prompt: str,
-    input_paths: list[str],
-    ratio: str,
-) -> str:
-    """Build the fixed nano-banana script command."""
-    script_path = (
-        Path.home()
-        / ".whaleclaw"
-        / "workspace"
-        / "skills"
-        / "nano-banana-image-t8"
-        / "scripts"
-        / "test_nano_banana_2.py"
-    )
-    parts = [
-        "./python/bin/python3.12",
-        shlex.quote(str(script_path)),
-        "--mode",
-        shlex.quote(mode),
-        "--model",
-        shlex.quote(model_display),
-        "--edit-model",
-        shlex.quote(model_display),
-        "--prompt",
-        shlex.quote(prompt),
-        "--aspect-ratio",
-        shlex.quote(ratio or "auto"),
-    ]
-    if model_display == "香蕉pro":
-        parts.extend(["--image-size", "2K"])
-    for path in input_paths:
-        parts.extend(["--input-image", shlex.quote(path)])
-    return " ".join(parts)
-
-
-def _parse_nano_banana_result_path(output: str) -> str:
-    for pattern in (
-        r"图生图成功:\s*(/[^\s]+)",
-        r"文生图成功:\s*(/[^\s]+)",
-        r"(/[^\s]+\.(?:png|jpg|jpeg|webp|gif))",
-    ):
-        match = re.search(pattern, output)
-        if match:
-            return match.group(1).strip()
-    return ""
-
-
-def _is_parallelizable_nano_banana_bash_call(tc: ToolCall) -> bool:
-    if tc.name != "bash":
-        return False
-    command = str(tc.arguments.get("command", "")).strip()
-    return "test_nano_banana" in command
-
-
-def _format_nano_banana_success_reply(
-    *,
-    model_display: str,
-    image_path: str,
-    regenerate: bool,
-) -> str:
-    lead = "重新生成好了：" if regenerate else "改好了："
-    lines = [f"当前使用模型：{model_display}", lead]
-    if image_path:
-        lines.append(f"![结果图]({image_path})")
-        lines.append(f"文件路径：{image_path}")
-    return "\n".join(lines)
-
-
-def _multi_agent_cfg(config: WhaleclawConfig) -> dict[str, object]:
-    plugins_raw = config.plugins
-    plugins: dict[str, object] = plugins_raw if isinstance(plugins_raw, dict) else {}  # pyright: ignore[reportAssignmentType, reportUnnecessaryIsInstance]
-    raw_ma = plugins.get("multi_agent", {})
-    if not isinstance(raw_ma, dict):
-        return {"enabled": False, "mode": "parallel", "max_rounds": 1, "roles": []}
-
-    raw: dict[str, object] = raw_ma  # pyright: ignore[reportAssignmentType, reportUnknownVariableType]
-    enabled = bool(raw.get("enabled", False))
-    mode_raw = str(raw.get("mode", "parallel")).strip().lower()
-    mode = mode_raw if mode_raw in {"parallel", "serial"} else "parallel"
-
-    try:
-        max_rounds = int(raw.get("max_rounds", 1))  # pyright: ignore[reportArgumentType]
-    except Exception:
-        max_rounds = 1
-    max_rounds = max(1, min(max_rounds, 10))
-
-    roles_raw = raw.get("roles")
-    roles: list[dict[str, object]] = []
-    if isinstance(roles_raw, list):
-        for idx, item in enumerate(roles_raw[:20], start=1):  # pyright: ignore[reportUnknownVariableType, reportUnknownArgumentType]
-            if not isinstance(item, dict):
-                continue
-            role_item: dict[str, object] = item  # pyright: ignore[reportAssignmentType, reportUnknownVariableType]
-            rid = str(role_item.get("id", f"role_{idx}")).strip().lower()
-            rid = "".join(ch for ch in rid if ch.isalnum() or ch in {"_", "-"})
-            if not rid:
-                rid = f"role_{idx}"
-            name = str(role_item.get("name", f"角色{idx}")).strip() or f"角色{idx}"
-            model = str(role_item.get("model", "")).strip()
-            system_prompt = str(role_item.get("system_prompt", "")).strip()
-            roles.append(
-                {
-                    "id": rid[:64],
-                    "name": name[:50],
-                    "enabled": bool(role_item.get("enabled", True)),
-                    "model": model[:100],
-                    "system_prompt": system_prompt[:3000],
-                }
-            )
-    return {
-        "enabled": enabled,
-        "mode": mode,
-        "max_rounds": max_rounds,
-        "roles": roles,
-}
-
-
-def _scenario_discuss_focus(scenario: str) -> str:
-    if scenario == "product_design":
-        return (
-            "重点和用户确认：产品目标、目标用户、核心场景、关键流程、约束条件、"
-            "以及交付物类型（如 PRD 文档、流程图图片、原型说明、里程碑计划）。"
-        )
-    if scenario == "content_creation":
-        return (
-            "重点和用户确认：受众人群、内容主题、语气风格、发布渠道、篇幅限制、"
-            "素材来源与交付物类型（文章/脚本/海报文案/配图说明）。"
-        )
-    if scenario == "software_development":
-        return (
-            "重点和用户确认：功能目标、技术栈、运行环境、改动范围、验收标准、"
-            "交付物类型（代码补丁、命令步骤、测试报告、部署说明）。"
-        )
-    if scenario == "data_analysis_decision":
-        return (
-            "重点和用户确认：决策问题、指标口径、数据来源、时间窗口、可信度要求、"
-            "交付物类型（分析报告、图表、结论摘要、决策建议表）。"
-        )
-    if scenario == "scientific_research":
-        return (
-            "重点和用户确认：研究问题、假设、实验条件、对照设计、评估指标、"
-            "交付物类型（研究提纲、实验方案、结果解读、论文结构草稿）。"
-        )
-    if scenario == "intelligent_assistant":
-        return (
-            "重点和用户确认：任务目标、时效要求、可调用工具、执行边界、"
-            "交付物类型（行动计划、提醒清单、消息草稿、执行结果汇总）。"
-        )
-    if scenario == "workflow_automation":
-        return (
-            "重点和用户确认：触发条件、上下游系统、字段映射、失败重试、监控告警、"
-            "交付物类型（流程设计文档、自动化脚本、运行手册、告警规则清单）。"
-        )
-    return "重点和用户确认目标、约束、验收标准与最终交付物类型。"
-
-
-def _scenario_delivery_focus(scenario: str) -> str:  # pyright: ignore[reportUnusedFunction]
-    if scenario == "product_design":
-        return (
-            "最终答复必须包含：\n"
-            "1) 产品方案摘要\n"
-            "2) 结构化交付物清单（文档/图片/表格）\n"
-            "3) 每个交付物的建议文件名与路径（例如 /tmp/product_prd.md）\n"
-            "4) 执行优先级与里程碑\n"
-            "5) 风险与备选方案"
-        )
-    if scenario == "content_creation":
-        return (
-            "最终答复必须包含：\n"
-            "1) 内容策略与目标受众\n"
-            "2) 成品文案或脚本草案\n"
-            "3) 渠道适配版本（至少 2 个）\n"
-            "4) 交付物清单与建议文件名/路径（如 /tmp/content_plan.md）\n"
-            "5) 发布节奏与复盘指标"
-        )
-    if scenario == "software_development":
-        return (
-            "最终答复必须包含：\n"
-            "1) 技术方案与实现路径\n"
-            "2) 关键代码改动点或命令步骤\n"
-            "3) 测试与回归计划\n"
-            "4) 交付物清单与建议文件名/路径（如 /tmp/impl_plan.md）\n"
-            "5) 风险、回滚与上线注意项"
-        )
-    if scenario == "data_analysis_decision":
-        return (
-            "最终答复必须包含：\n"
-            "1) 数据结论与关键洞察\n"
-            "2) 指标口径说明与分析过程摘要\n"
-            "3) 决策选项对比与推荐方案\n"
-            "4) 交付物清单与建议文件名/路径（如 /tmp/analysis_report.md）\n"
-            "5) 风险假设与后续验证计划"
-        )
-    if scenario == "scientific_research":
-        return (
-            "最终答复必须包含：\n"
-            "1) 研究目标与假设\n"
-            "2) 方法设计与实验步骤\n"
-            "3) 结果解读框架与可信度边界\n"
-            "4) 交付物清单与建议文件名/路径（如 /tmp/research_plan.md）\n"
-            "5) 下一步实验与论文化建议"
-        )
-    if scenario == "intelligent_assistant":
-        return (
-            "最终答复必须包含：\n"
-            "1) 任务拆解与优先级\n"
-            "2) 可执行动作清单\n"
-            "3) 关键提醒与时间节点\n"
-            "4) 交付物清单与建议文件名/路径（如 /tmp/assistant_actions.md）\n"
-            "5) 异常处理与后续跟进建议"
-        )
-    if scenario == "workflow_automation":
-        return (
-            "最终答复必须包含：\n"
-            "1) 自动化流程设计（触发-处理-输出）\n"
-            "2) 集成接口与字段映射说明\n"
-            "3) 失败重试与告警策略\n"
-            "4) 交付物清单与建议文件名/路径（如 /tmp/workflow_spec.md）\n"
-            "5) 上线运行与运维检查清单"
-        )
-    return (
-        "最终答复必须包含：结论、可执行清单、交付物清单（含建议文件名/路径）、"
-        "风险与回滚建议。"
-    )
-
-
-def _resolve_multi_agent_cfg(
-    config: WhaleclawConfig,
-    session: Session | None,
-) -> dict[str, object]:
-    """Build effective multi-agent config with optional session overrides."""
-    cfg = _multi_agent_cfg(config)
-    plugins_raw2 = config.plugins
-    plugins2: dict[str, object] = plugins_raw2 if isinstance(plugins_raw2, dict) else {}  # pyright: ignore[reportAssignmentType, reportUnnecessaryIsInstance]
-    raw = plugins2.get("multi_agent", {})
-    if isinstance(raw, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
-        raw_typed: dict[str, object] = raw  # pyright: ignore[reportAssignmentType, reportUnknownVariableType]
-        scenario = str(raw_typed.get("scenario", "software_development")).strip()
-        cfg["scenario"] = scenario or "software_development"
-    else:
-        cfg["scenario"] = "software_development"
-    if session is None or not isinstance(session.metadata, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
-        return cfg
-
-    metadata = session.metadata
-    if isinstance(metadata.get("multi_agent_enabled"), bool):
-        cfg["enabled"] = bool(metadata["multi_agent_enabled"])
-
-    mode_raw = str(metadata.get("multi_agent_mode", "")).strip().lower()
-    if mode_raw in {"parallel", "serial"}:
-        cfg["mode"] = mode_raw
-
-    rounds_raw = metadata.get("multi_agent_max_rounds")
-    if isinstance(rounds_raw, int):
-        cfg["max_rounds"] = max(1, min(rounds_raw, 10))
-
-    return cfg
-
-
-def _is_multi_agent_confirm(text: str) -> bool:
-    t = text.strip()
-    if not t:
-        return False
-    return any(p.search(t) for p in _MULTI_AGENT_CONFIRM_PATTERNS)
-
-
-def _is_multi_agent_cancel(text: str) -> bool:
-    t = text.strip()
-    if not t:
-        return False
-    return any(p.search(t) for p in _MULTI_AGENT_CANCEL_PATTERNS)
-
-
-def _extract_multi_agent_rounds(text: str) -> int | None:
-    t = text.strip()
-    if not t:
-        return None
-    for p in _MULTI_AGENT_ROUNDS_PATTERNS:
-        m = p.search(t)
-        if not m:
-            continue
-        try:
-            value = int(m.group(1))
-        except Exception:
-            return None
-        if 1 <= value <= 10:
-            return value
-    return None
-
-
-def _attach_rounds_marker(topic: str, rounds: int) -> str:
-    clean = re.sub(r"\[MA_ROUNDS=\d{1,2}\]\s*", "", topic).strip()
-    return f"[MA_ROUNDS={rounds}] {clean}".strip()
-
-
-def _extract_rounds_marker(topic: str) -> tuple[str, int | None]:
-    m = re.search(r"\[MA_ROUNDS=(\d{1,2})\]", topic)
-    if not m:
-        return (topic, None)
-    try:
-        value = int(m.group(1))
-    except Exception:
-        value = None
-    clean = re.sub(r"\[MA_ROUNDS=\d{1,2}\]\s*", "", topic).strip()
-    if value is None or not (1 <= value <= 10):
-        return (clean, None)
-    return (clean, value)
-
-
-def _is_multi_agent_discuss_done(text: str) -> bool:
-    t = text.strip()
-    if not t:
-        return False
-    return any(p.search(t) for p in _MULTI_AGENT_DISCUSS_DONE_PATTERNS)
-
-
-def _format_multi_agent_preflight_text(  # pyright: ignore[reportUnusedFunction]
-    *,
-    cfg: dict[str, object],
-    topic: str,
-) -> str:
-    roles = [
-        role
-        for role in cast(list[dict[str, object]], cfg["roles"])
-        if bool(role.get("enabled", True))
-    ]
-    mode = cast(str, cfg["mode"])
-    rounds = cast(int, cfg["max_rounds"])
-    mode_cn = "并行" if mode == "parallel" else "串行"
-    lines = [
-        "已进入多Agent准备阶段（尚未开始执行）。",
-        f"- 当前模式: {mode_cn}（{mode}）",
-        f"- 计划回合: {rounds}",
-        f"- 角色数量: {len(roles)}",
-        "",
-        "角色分工:",
-    ]
-    for role in roles:
-        name = str(role.get("name", role.get("id", "角色"))).strip() or "角色"
-        duty = _multi_agent_system_prompt(role)
-        lines.append(f"- {name}: {_compact_role_output(duty, 120)}")
-    lines.extend(
-        [
-            "",
-            "主控建议:",
-            "- 先确认目标、交付形式、截止时间与约束。",
-            "- 若希望更快出结论，可先改为 2 轮；若任务复杂建议 4 轮以上。",
-            "",
-            f"当前议题: {topic.strip() or '(未提供)'}",
-            "",
-            "回复以下任一指令继续:",
-            "- 回复“确认开始”：按当前配置启动多Agent执行",
-            "- 回复“改为N轮”：修改回合后继续等待确认",
-            "- 回复“取消”：退出本次多Agent执行",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _multi_agent_module():
-    from whaleclaw.agent import multi_agent
-
-    return multi_agent
-
-
-def multi_agent_system_prompt(role: dict[str, object]) -> str:
-    return _multi_agent_module().multi_agent_system_prompt(role)
-
-
-def compact_role_output(text: str, max_chars: int = 600) -> str:
-    return _multi_agent_module().compact_role_output(text, max_chars)
-
-
-def looks_like_bad_coordinator_output(text: str) -> bool:
-    return _multi_agent_module().looks_like_bad_coordinator_output(text)
-
-
-def looks_like_role_stall_output(text: str) -> bool:
-    return _multi_agent_module().looks_like_role_stall_output(text)
-
-
-def need_image_output(user_message: str) -> bool:
-    return _multi_agent_module().need_image_output(user_message)
-
-
-def extract_requested_deliverables(user_message: str) -> list[str]:
-    return _multi_agent_module().extract_requested_deliverables(user_message)
-
-
-def build_multi_agent_requirement_baseline(
-    *,
-    message: str,
-    scenario: str,
-    mode: str,
-    max_rounds: int,
-    requested_deliverables: list[str],
-) -> str:
-    return _multi_agent_module().build_multi_agent_requirement_baseline(
-        message=message,
-        scenario=scenario,
-        mode=mode,
-        max_rounds=max_rounds,
-        requested_deliverables=requested_deliverables,
-    )
-
+def _snapshot_image_history_at_activation(session: Session) -> None:
+    """记录技能激活时 image_reference_history 的长度，用于后续过滤旧图。"""
+    raw = session.metadata.get("image_reference_history", [])
+    length = len(raw) if isinstance(raw, list) else 0
+    session.metadata["__skill_activation_image_snapshot__"] = length
+
+
+def _contains_lock_confirm_tip(text: str) -> bool:
+    """Check if the reply already contains the lock-confirm tip."""
+    return "任务完成" in text and "解除技能锁定" in text
+
+
+def _cleanup_final_reply_text(text: str) -> str:
+    """Trim excessive blank lines and whitespace from the final reply."""
+    text = text.strip()
+    while "\n\n\n" in text:
+        text = text.replace("\n\n\n", "\n\n")
+    return text
+
+
+def _canonicalize_lock_confirm_tip(text: str, tip: str) -> str:
+    """Ensure the lock-confirm tip appears at most once, at the end."""
+    if not tip or tip not in text:
+        return text
+    cleaned = text.replace(tip, "").strip()
+    while "\n\n\n" in cleaned:
+        cleaned = cleaned.replace("\n\n\n", "\n\n")
+    return f"{cleaned}\n{tip}" if cleaned else tip
+
+
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    attach_rounds_marker as _attach_rounds_marker,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    build_multi_agent_requirement_baseline,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    compact_role_output,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    extract_multi_agent_rounds as _extract_multi_agent_rounds,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    extract_requested_deliverables,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    extract_rounds_marker as _extract_rounds_marker,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    format_multi_agent_preflight_text as _format_multi_agent_preflight_text,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    is_multi_agent_cancel as _is_multi_agent_cancel,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    is_multi_agent_confirm,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    is_multi_agent_discuss_done,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    looks_like_bad_coordinator_output,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    looks_like_role_stall_output,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    multi_agent_cfg as _multi_agent_cfg,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    multi_agent_system_prompt,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    need_image_output,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    persist_session_metadata as _persist_session_metadata,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    resolve_multi_agent_cfg as _resolve_multi_agent_cfg,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    run_multi_agent_controller_discussion as _run_multi_agent_controller_discussion,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    run_multi_agent_executor as _run_multi_agent_executor,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    scenario_delivery_focus as _scenario_delivery_focus,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    scenario_discuss_focus as _scenario_discuss_focus,
+)
+from whaleclaw.agent.helpers.multi_agent_helpers import (
+    sync_multi_agent_compression_boundary as _sync_multi_agent_compression_boundary,
+)
 
 _multi_agent_system_prompt = multi_agent_system_prompt
 _compact_role_output = compact_role_output
@@ -1977,155 +888,21 @@ _looks_like_role_stall_output = looks_like_role_stall_output
 _need_image_output = need_image_output
 _extract_requested_deliverables = extract_requested_deliverables
 _build_multi_agent_requirement_baseline = build_multi_agent_requirement_baseline
-
+_is_multi_agent_confirm = is_multi_agent_confirm
+_is_multi_agent_discuss_done = is_multi_agent_discuss_done
 
 scenario_discuss_focus = _scenario_discuss_focus
 truncate_to_tokens = _truncate_to_tokens
 resolve_multi_agent_cfg = _resolve_multi_agent_cfg
-is_multi_agent_confirm = _is_multi_agent_confirm
+is_multi_agent_confirm = _is_multi_agent_confirm  # pyright: ignore[reportRedeclaration]
 extract_multi_agent_rounds = _extract_multi_agent_rounds
-is_multi_agent_discuss_done = _is_multi_agent_discuss_done
+is_multi_agent_discuss_done = _is_multi_agent_discuss_done  # pyright: ignore[reportRedeclaration]
 select_native_tool_names = _select_native_tool_names
 extract_round_delivery_section = _extract_round_delivery_section
 extract_delivery_artifact_paths = _extract_delivery_artifact_paths
 fix_version_suffix = _fix_version_suffix
 snapshot_round_artifacts = _snapshot_round_artifacts
 extract_artifact_baseline = _extract_artifact_baseline
-
-
-async def _persist_session_metadata(
-    session: Session | None,
-    session_manager: SessionManager | None,
-) -> bool:
-    if session is None or session_manager is None:
-        return False
-    try:
-        await session_manager.update_metadata(session, session.metadata)
-    except Exception:
-        return False
-    return True
-
-
-async def _sync_multi_agent_compression_boundary(
-    session: Session | None,
-    session_manager: SessionManager | None,
-    group_compressor: "SessionGroupCompressor | None" = None,
-    *,
-    ma_enabled: bool,
-) -> None:
-    """Track MA on/off transition and set compression boundary on MA -> single.
-
-    When MA is enabled, mark current session as MA-active.
-    When MA turns off, record a fixed message-index boundary so future
-    group-compression only applies to newly produced messages.
-    """
-    if session is None or not isinstance(session.metadata, dict):  # pyright: ignore[reportUnnecessaryIsInstance]
-        return None
-    metadata = session.metadata
-    prev_active = bool(metadata.get("multi_agent_active_prev", False))
-    changed = False
-    if ma_enabled:
-        if not prev_active:
-            metadata["multi_agent_active_prev"] = True
-            changed = True
-    else:
-        if prev_active:
-            metadata["multi_agent_active_prev"] = False
-            metadata["compression_resume_message_index"] = len(session.messages)
-            changed = True
-    if group_compressor is not None:  # session already checked above
-        try:
-            await group_compressor.set_session_suspended(
-                session_id=session.id,
-                suspended=ma_enabled,
-            )
-        except Exception as exc:
-            log.debug(
-                "agent.multi_agent_compressor_toggle_failed",
-                session_id=session.id,
-                error=str(exc),
-                enabled=ma_enabled,
-            )
-    if not changed or session_manager is None:
-        return None
-    try:
-        await asyncio.wait_for(
-            session_manager.update_metadata(session, session.metadata),
-            timeout=1.5,
-        )
-        return None
-    except Exception as exc:
-        log.warning(
-            "agent.multi_agent_metadata_persist_failed",
-            session_id=session.id,
-            error=str(exc),
-        )
-        return None
-
-
-async def _run_multi_agent_controller_discussion(
-    *,
-    user_message: str,
-    pending_topic: str,
-    cfg: dict[str, object],
-    session_id: str,
-    config: WhaleclawConfig,
-    router: ModelRouter,
-    registry: ToolRegistry,
-    extra_memory: str,
-    trigger_event_id: str,
-    trigger_text_preview: str,
-    include_intro: bool,
-) -> str:
-    from whaleclaw.agent import multi_agent as _multi_agent
-
-    return await _multi_agent.run_multi_agent_controller_discussion(
-        user_message=user_message,
-        pending_topic=pending_topic,
-        cfg=cfg,
-        session_id=session_id,
-        config=config,
-        router=router,
-        registry=registry,
-        extra_memory=extra_memory,
-        trigger_event_id=trigger_event_id,
-        trigger_text_preview=trigger_text_preview,
-        include_intro=include_intro,
-    )
-
-
-async def _run_multi_agent_executor(
-    *,
-    message: str,
-    session_id: str,
-    config: WhaleclawConfig,
-    on_stream: StreamCallback | None,
-    router: ModelRouter,
-    registry: ToolRegistry,
-    images: list[ImageContent] | None,
-    extra_memory: str,
-    trigger_event_id: str,
-    trigger_text_preview: str,
-    ma_cfg: dict[str, object],
-    on_round_result: OnRoundResult | None = None,
-) -> str:
-    from whaleclaw.agent import multi_agent as _multi_agent
-
-    return await _multi_agent.run_multi_agent_executor(
-        message=message,
-        session_id=session_id,
-        config=config,
-        on_stream=on_stream,
-        router=router,
-        registry=registry,
-        images=images,
-        extra_memory=extra_memory,
-        trigger_event_id=trigger_event_id,
-        trigger_text_preview=trigger_text_preview,
-        ma_cfg=ma_cfg,
-        on_round_result=on_round_result,
-    )
-
 
 async def run_agent(
     message: str,
@@ -2139,6 +916,7 @@ async def run_agent(
     on_tool_call: OnToolCall | None = None,
     on_tool_result: OnToolResult | None = None,
     on_round_result: OnRoundResult | None = None,
+    on_done: OnAgentDone | None = None,
     images: list[ImageContent] | None = None,
     session_manager: SessionManager | None = None,
     session_store: SessionStore | None = None,
@@ -2388,6 +1166,7 @@ async def run_agent(
         )
 
     metadata_dirty = False
+    assistant_name = _DEFAULT_ASSISTANT_NAME
 
     llm_message = message
     locked_skill_ids: list[str] = []
@@ -2400,16 +1179,21 @@ async def run_agent(
     skill_queue: list[dict[str, str]] = []
     skill_queue_index: int = 0
     has_skill_queue = False
-    nano_banana_recommended_command: str = ""
+    _skill_recommended_commands: dict[str, str] = {}
     routed_skills: list[Skill] = []
     routed_skill_ids: list[str] = []
     if not multi_agent_internal:
         if session is not None:
             raw_queue = session.metadata.get("skill_queue")
             if isinstance(raw_queue, list) and raw_queue:
+                queue_items = cast(list[object], raw_queue)
                 skill_queue = [
-                    {str(k): str(v) for k, v in item.items() if isinstance(k, str)}
-                    for item in raw_queue
+                    {
+                        key: str(value)
+                        for key, value in cast(dict[object, object], item).items()
+                        if isinstance(key, str)
+                    }
+                    for item in queue_items
                     if isinstance(item, dict)
                 ]
                 raw_idx = session.metadata.get("skill_queue_index")
@@ -2448,26 +1232,30 @@ async def run_agent(
             session.metadata.pop("pending_skill_switch_ids", None)
             session.metadata.pop("pending_skill_switch_message", None)
 
-        if (
-            lock_is_explicit
-            and "nano-banana-image-t8" in locked_skill_ids
-            and _is_nano_banana_activation_message(message)
-        ):
-            model_display = _resolve_nano_banana_model_display(session)
-            return (
-                "当前会话仍在香蕉生图技能里。"
-                f"当前模型：{model_display}。\n"
-                "如果要继续生图，请直接发送提示词或图片；"
-                "如果本轮已结束，请回复“任务完成”解除技能锁定。"
-            )
-        if (
-            lock_is_explicit
-            and "nano-banana-image-t8" in locked_skill_ids
-            and _is_image_reference_lookup_message(llm_message)
+        if lock_is_explicit and locked_skill_ids:
+            _activation_skills = _assembler.route_skills(message, forced_skill_ids=locked_skill_ids)
+            for _act_skill in _activation_skills:
+                _act_hooks = get_skill_hooks(_act_skill)
+                if _act_hooks is not None and _act_hooks.is_activation_message(message):
+                    _already_reply = _act_hooks.build_already_locked_reply(session)
+                    if _already_reply is not None:
+                        return _already_reply
+        _locked_hooks_for_ref = [
+            get_skill_hooks(s)
+            for s in _assembler.route_skills(llm_message, forced_skill_ids=locked_skill_ids)
+            if get_skill_hooks(s) is not None
+        ] if lock_is_explicit and locked_skill_ids else []
+        if lock_is_explicit and locked_skill_ids and _is_image_reference_lookup_message(
+            llm_message, locked_hooks=_locked_hooks_for_ref, session=session,  # type: ignore[arg-type]
         ):
             ref_path = _resolve_relative_image_reference_path(session, llm_message)
+            if not ref_path:
+                # 用户没有指定"这张"/"上一张"，兜底取最新生成的图片
+                recent = _recover_recent_session_image_paths(session, limit=1)
+                if recent:
+                    ref_path = recent[0]
             if ref_path:
-                return f"你说的这张是：\n路径：{ref_path}\n\n![历史图片]({ref_path})"
+                return f"你说的这张是：\n\n![历史图片]({ref_path})"
 
         use_cmd = _parse_use_command(message, use_cmd_re=_USE_CMD_RE)
         if use_cmd is not None:
@@ -2508,13 +1296,24 @@ async def run_agent(
                         session.metadata["locked_skill_ids"] = locked_skill_ids
                         session.metadata["skill_lock_waiting_done"] = False
                         session.metadata["skill_lock_announce_pending"] = True
+                        session.metadata.pop("skill_param_state", None)
+                        # 切换技能时清理上一轮遗留的图片/草稿数据
+                        session.metadata.pop("last_generated_image_path", None)
+                        session.metadata.pop("last_input_image_paths", None)
+                        session.metadata.pop("image_reference_history", None)
+                        _snapshot_image_history_at_activation(session)
                     else:
                         session.metadata.pop("locked_skill_ids", None)
                         session.metadata.pop("skill_lock_waiting_done", None)
                         session.metadata.pop("skill_lock_announce_pending", None)
+                        session.metadata.pop("skill_param_state", None)
                         session.metadata.pop("skill_queue", None)
                         session.metadata.pop("skill_queue_index", None)
                         session.metadata.pop("skill_queue_original_message", None)
+                        session.metadata.pop("__skill_activation_image_snapshot__", None)
+                        session.metadata.pop("last_generated_image_path", None)
+                        session.metadata.pop("last_input_image_paths", None)
+                        session.metadata.pop("image_reference_history", None)
                     metadata_dirty = True
                 if not lockable_use_skill_ids:
                     skill_queue = []
@@ -2539,6 +1338,11 @@ async def run_agent(
                 session.metadata.pop("skill_queue", None)
                 session.metadata.pop("skill_queue_index", None)
                 session.metadata.pop("skill_queue_original_message", None)
+                session.metadata.pop("__skill_activation_image_snapshot__", None)
+                # 清理上一轮技能遗留的图片/草稿数据，防止下次使用技能时互相污染
+                session.metadata.pop("last_generated_image_path", None)
+                session.metadata.pop("last_input_image_paths", None)
+                session.metadata.pop("image_reference_history", None)
                 if session_manager is not None:
                     await session_manager.update_metadata(session, session.metadata)
             return "已确认任务完成，已解除本轮技能锁定。"
@@ -2565,6 +1369,7 @@ async def run_agent(
                     session.metadata["locked_skill_ids"] = locked_skill_ids
                     session.metadata["skill_lock_waiting_done"] = False
                     session.metadata.pop("skill_param_state", None)
+                    _snapshot_image_history_at_activation(session)
                     metadata_dirty = True
                 next_task = skill_queue[next_idx].get("task", "")
                 original_msg = ""
@@ -2614,6 +1419,12 @@ async def run_agent(
         routed_skills = _assembler.route_skills(llm_message)
         routed_skill_ids = _normalize_skill_ids(routed_skills)
         lockable_routed_skill_ids = _lockable_skill_ids(routed_skills)
+
+        is_deferred = _is_deferred_task_intent(message) and not lock_is_explicit
+        if is_deferred:
+            routed_skills = []
+            routed_skill_ids = []
+            lockable_routed_skill_ids = []
 
         _is_compound_with_other_steps = (
             routed_skill_ids
@@ -2668,6 +1479,7 @@ async def run_agent(
                     session.metadata["locked_skill_ids"] = locked_skill_ids
                     session.metadata["skill_lock_waiting_done"] = False
                     session.metadata["skill_lock_announce_pending"] = False
+                    _snapshot_image_history_at_activation(session)
                     metadata_dirty = True
                     status_text = _build_skill_queue_status_message(
                         skill_queue, skill_queue_index,
@@ -2691,6 +1503,7 @@ async def run_agent(
                     session.metadata["locked_skill_ids"] = locked_skill_ids
                     session.metadata["skill_lock_waiting_done"] = False
                     session.metadata["skill_lock_announce_pending"] = True
+                    _snapshot_image_history_at_activation(session)
                     metadata_dirty = True
             else:
                 # 用户说"使用xxx技能"明确激活时，即使 lock_session=False 也锁定
@@ -2709,6 +1522,7 @@ async def run_agent(
                     session.metadata["locked_skill_ids"] = locked_skill_ids
                     session.metadata["skill_lock_waiting_done"] = False
                     session.metadata["skill_lock_announce_pending"] = True
+                    _snapshot_image_history_at_activation(session)
                     metadata_dirty = True
         elif not locked_skill_ids and lockable_routed_skill_ids:
             pending_lock_skill_ids = lockable_routed_skill_ids
@@ -2719,13 +1533,18 @@ async def run_agent(
             and routed_skill_ids
             and routed_skill_ids != locked_skill_ids
         ):
-            if (
-                "nano-banana-image-t8" in locked_skill_ids
-                and (
-                    _is_numbered_image_reference_edit_message(message)
-                    or _message_requests_image_regenerate(message)
-                )
-            ):
+            _keep_locked_route = False
+            for _sid in locked_skill_ids:
+                _locked_skill_list = _assembler.route_skills("", forced_skill_ids=[_sid])
+                for _ls in _locked_skill_list:
+                    _lh = get_skill_hooks(_ls)
+                    if _lh is not None and (
+                        _is_numbered_image_reference_edit_message(message)
+                        or _message_requests_image_regenerate(message)
+                    ):
+                        _keep_locked_route = True
+                        break
+            if _keep_locked_route:
                 routed_skill_ids = []
                 routed_skills = []
                 lockable_routed_skill_ids = []
@@ -2755,23 +1574,50 @@ async def run_agent(
                     )
                 routed_skill_ids = []
                 routed_skills = []
+                lockable_routed_skill_ids = []
 
         active_skills_for_images = routed_skills
         if lock_is_explicit and locked_skill_ids:
             active_skills_for_images = _assembler.route_skills(
                 llm_message, forced_skill_ids=locked_skill_ids
             )
+        _early_hooks_non_exec = False
+        if lock_is_explicit and locked_skill_ids:
+            _input_paths_for_check = _extract_input_image_paths_from_text(llm_message)
+            _has_input_for_check = bool(_input_paths_for_check)
+            for _esk in active_skills_for_images:
+                _eh = get_skill_hooks(_esk)
+                if _eh is not None and _eh.is_execution_request(
+                    llm_message, has_new_input_images=_has_input_for_check, session=session,
+                ) is False:
+                    _early_hooks_non_exec = True
+                    break
         if not images:
             recovered_images: list[ImageContent] = []
             reuse_reason = ""
             skill_needs_images = _skill_requires_images(active_skills_for_images)
+            if _early_hooks_non_exec:
+                skill_needs_images = False
+            # guard 阶段且从未执行过（没有生成过图片），不要注入旧图
+            if (
+                skill_needs_images
+                and lock_is_explicit
+                and not lock_waiting_done
+                and not (session and session.metadata.get("last_generated_image_path"))
+            ):
+                skill_needs_images = False
             if _message_requests_image_regenerate(llm_message):
-                if (
-                    "nano-banana-image-t8" in locked_skill_ids
-                    and _recover_last_nano_banana_mode(session) == "text"
-                ):
-                    recovered_images = []
-                else:
+                _skip_reuse = False
+                if lock_is_explicit and locked_skill_ids:
+                    for _rsk in active_skills_for_images:
+                        _rh = get_skill_hooks(_rsk)
+                        if _rh is not None:
+                            _rh_state = (session.metadata.get("skill_param_state", {}) or {}).get(_rsk.id, {}) if session else {}
+                            _rh_mode = _rh_state.get("__mode__") or _rh_state.get("__last_mode__", "")
+                            if str(_rh_mode).strip().lower() == "text":
+                                _skip_reuse = True
+                                break
+                if not _skip_reuse:
                     recovered_images = _recover_last_input_images(session)
                     reuse_reason = "last_input_images"
             elif _message_requests_image_edit(llm_message) and (
@@ -2782,6 +1628,17 @@ async def run_agent(
                 if not recovered_images:
                     recovered_images = _recover_last_input_images(session)
                     reuse_reason = "last_input_images_fallback"
+            if not recovered_images and (
+                _message_may_need_prior_images(llm_message)
+                or (skill_needs_images and lock_is_explicit)
+            ):
+                recovered_images = _recover_last_input_images(session)
+                reuse_reason = "skill_or_reference_images"
+            if not recovered_images:
+                inline_paths = _extract_input_image_paths_from_text(llm_message)
+                if inline_paths:
+                    recovered_images = _load_images_from_paths(inline_paths)
+                    reuse_reason = "inline_markdown_paths"
             if recovered_images:
                 images = recovered_images
                 log.info(
@@ -2798,33 +1655,28 @@ async def run_agent(
                 session.metadata["last_input_image_paths"] = current_input_paths
                 _append_image_reference_history(session.metadata, current_input_paths)
                 metadata_dirty = True
-        nano_banana_control_only = (
-            lock_is_explicit
-            and "nano-banana-image-t8" in locked_skill_ids
-            and _is_nano_banana_control_message(llm_message)
-        )
-        nano_banana_activation_only = (
-            lock_is_explicit
-            and "nano-banana-image-t8" in locked_skill_ids
-            and _is_nano_banana_activation_message(llm_message)
-        )
-        nano_banana_execution_request = _is_nano_banana_execution_request(
-            message=llm_message,
-            has_new_input_images=has_new_input_images,
-        )
-        if (
-            lock_is_explicit
-            and "nano-banana-image-t8" in locked_skill_ids
-            and not nano_banana_control_only
-            and not nano_banana_execution_request
-        ):
-            active_skills_for_images = []
-        skip_nano_banana_guard = (
-            lock_is_explicit
-            and "nano-banana-image-t8" in locked_skill_ids
-            and not nano_banana_control_only
-            and not nano_banana_execution_request
-        )
+        _hooks_control_only = False
+        _hooks_activation_only = False
+        _hooks_execution_request = False
+        _hooks_skip_guard_ids: set[str] = set()
+        if lock_is_explicit and locked_skill_ids:
+            _hooks_locked_skills = _assembler.route_skills(llm_message, forced_skill_ids=locked_skill_ids)
+            for _hls in _hooks_locked_skills:
+                _hlh = get_skill_hooks(_hls)
+                if _hlh is None:
+                    continue
+                if _hlh.is_control_message(llm_message):
+                    _hooks_control_only = True
+                if _hlh.is_activation_message(llm_message):
+                    _hooks_activation_only = True
+                _exec_req = _hlh.is_execution_request(
+                    llm_message, has_new_input_images=has_new_input_images, session=session,
+                )
+                if _exec_req is True:
+                    _hooks_execution_request = True
+                if not _hooks_control_only and _exec_req is False:
+                    _hooks_skip_guard_ids.add(_hls.id)
+                    active_skills_for_images = []
 
         if (
             _is_compound_with_other_steps
@@ -2843,11 +1695,12 @@ async def run_agent(
             session.metadata.pop("skill_param_state", None)
             metadata_dirty = True
 
+        assistant_name = _DEFAULT_ASSISTANT_NAME
         if lock_is_explicit and locked_skill_ids and not lock_waiting_done and session is not None:
             forced_skill_ids = locked_skill_ids
-            if skip_nano_banana_guard:
+            if _hooks_skip_guard_ids:
                 forced_skill_ids = [
-                    skill_id for skill_id in locked_skill_ids if skill_id != "nano-banana-image-t8"
+                    skill_id for skill_id in locked_skill_ids if skill_id not in _hooks_skip_guard_ids
                 ]
             locked_skills = _assembler.route_skills(llm_message, forced_skill_ids=forced_skill_ids)
             guards = _guarded_skills(locked_skills)
@@ -2860,7 +1713,9 @@ async def run_agent(
                         if not isinstance(key, str) or not isinstance(value, dict):
                             continue
                         normalized_value: dict[str, object] = {
-                            str(k): v for k, v in value.items() if isinstance(k, str)
+                            item_key: item_value
+                            for item_key, item_value in cast(dict[object, object], value).items()
+                            if isinstance(item_key, str)
                         }
                         state_map[key] = normalized_value
                 missing_any = False
@@ -2874,82 +1729,73 @@ async def run_agent(
                         if isinstance(skill_state_raw, dict)  # pyright: ignore[reportUnnecessaryIsInstance]
                         else {}
                     )
-                    updated, missing = _update_guard_state(
-                        guard.params, skill_state, llm_message, images
-                    )
-                    if skill.id == "nano-banana-image-t8":
-                        if skip_nano_banana_guard:
-                            state_map[skill.id] = skill_state
-                            continue
-                        previous_prompt = str(skill_state.get("prompt", "")).strip()
-                        control_message_only = nano_banana_control_only
-                        if control_message_only and "prompt" in updated:
-                            updated["prompt"] = skill_state.get("prompt")
-                        elif has_new_input_images:
-                            cleaned_prompt = _clean_nano_banana_prompt_delta(llm_message)
-                            if cleaned_prompt:
-                                updated["prompt"] = cleaned_prompt
+                    _key_persisted = _persist_param_api_key(guard.params, llm_message)
+                    if _key_persisted:
+                        skill_state["api_key"] = "__present__"
+                        state_map[skill.id] = skill_state
+                        session.metadata["skill_param_state"] = state_map
+                        if session_manager is not None:
+                            await session_manager.update_metadata(session, session.metadata)
+                        return "API Key 已保存。需要生图时直接发提示词即可。"
+                    _skill_hooks = get_skill_hooks(skill)
+                    if _skill_hooks is not None and skill.id in _hooks_skip_guard_ids:
+                        state_map[skill.id] = skill_state
+                        continue
+                    # 只有本轮确实有新图片时才把 images 传给 guard，
+                    # 避免恢复的旧图片被误计入 guard state
+                    _guard_images = images if has_new_input_images else None
+                    if _skill_hooks is not None:
+                        for _gp in guard.params:
+                            if _gp.type == "api_key" and not skill_state.get(_gp.key):
+                                from whaleclaw.agent.helpers.skill_helpers import capture_param_value, param_satisfied
+                                _captured = capture_param_value(_gp, llm_message, _guard_images, skill_state.get(_gp.key))
+                                if param_satisfied(_gp, _captured):
+                                    skill_state[_gp.key] = _captured
+                        hooks_updated = _skill_hooks.update_guard_state(
+                            skill_state, llm_message, _guard_images,
+                            session=session, has_new_input_images=has_new_input_images,
+                        )
+                        if hooks_updated is not None:
+                            updated = hooks_updated
+                            _effective_ctrl_only = _hooks_control_only and not _hooks_execution_request
+                            hooks_missing = _skill_hooks.missing_required(
+                                updated, control_message_only=_effective_ctrl_only,
+                            )
+                            missing = hooks_missing if hooks_missing is not None else True
                         else:
-                            # 用户明确说"文生图"时，视为全新请求，
-                            # 不当作 edit/regenerate 来合并旧 prompt。
-                            _is_explicit_t2i = any(
-                                p.search(llm_message)
-                                for p in _NANO_BANANA_TEXT_TO_IMAGE_PATTERNS
+                            updated, missing = _update_guard_state(
+                                guard.params, skill_state, llm_message, _guard_images
                             )
-                            merged_prompt = _merge_nano_banana_prompt(
-                                previous_prompt=previous_prompt,
-                                message=llm_message,
-                                regenerate=(
-                                    _message_requests_image_regenerate(llm_message)
-                                    and not _is_explicit_t2i
-                                ),
-                                image_edit=(
-                                    _message_requests_image_edit(llm_message)
-                                    and not _is_explicit_t2i
-                                ),
+                            _effective_ctrl_only2 = _hooks_control_only and not _hooks_execution_request
+                            hooks_missing = _skill_hooks.missing_required(
+                                updated, control_message_only=_effective_ctrl_only2,
                             )
-                            if merged_prompt:
-                                updated["prompt"] = merged_prompt
-                        previous_model = str(
-                            skill_state.get(
-                                "__model_display__",
-                                _load_saved_nano_banana_model_display(),
-                            )
-                        )
-                        updated["__model_display__"] = _detect_nano_banana_model_display(
-                            llm_message,
-                            previous=previous_model,
-                        )
-                        session.metadata["last_nano_banana_model_display"] = str(
-                            updated["__model_display__"]
-                        ).strip() or previous_model
-                        missing = _nano_banana_missing_required(
-                            updated,
-                            control_message_only=control_message_only,
+                            if hooks_missing is not None:
+                                missing = hooks_missing
+                    else:
+                        updated, missing = _update_guard_state(
+                            guard.params, skill_state, llm_message, _guard_images
                         )
                     state_map[skill.id] = updated
+                    if skill.id == "nano-banana-image-t8":
+                        model_display = updated.get("__model_display__")
+                        if model_display in {"香蕉2", "香蕉pro"}:
+                            session.metadata["last_nano_banana_model_display"] = model_display
                     missing_any = missing_any or missing
                 session.metadata["skill_param_state"] = state_map
                 metadata_dirty = True
-                if (
-                    "nano-banana-image-t8" in forced_skill_ids
-                    and nano_banana_control_only
-                    and not nano_banana_activation_only
-                    and not nano_banana_execution_request
-                ):
-                    if session_manager is not None:
-                        await session_manager.update_metadata(session, session.metadata)
-                    model_display = str(
-                        state_map.get("nano-banana-image-t8", {}).get(
-                            "__model_display__",
-                            _resolve_nano_banana_model_display(session),
-                        )
-                    ).strip() or _resolve_nano_banana_model_display(session)
-                    return (
-                        f"已切换本次生图模型为：{model_display}。\n"
-                        "如需继续生图，请直接发送提示词或图片；"
-                        "如本轮任务已结束，请回复“任务完成”解除技能锁定。"
-                    )
+                # 通用 hooks: 控制消息直接返回
+                if _hooks_control_only and not _hooks_activation_only and not _hooks_execution_request:
+                    for _ctrl_skill in guards:
+                        _ctrl_hooks = get_skill_hooks(_ctrl_skill)
+                        if _ctrl_hooks is not None and _ctrl_hooks.is_control_message(llm_message):
+                            if session_manager is not None:
+                                await session_manager.update_metadata(session, session.metadata)
+                            _ctrl_reply = _ctrl_hooks.handle_control_message(
+                                llm_message, state_map.get(_ctrl_skill.id, {}), session,
+                            )
+                            if _ctrl_reply is not None:
+                                return _ctrl_reply
                 if missing_any:
                     if session_manager is not None:
                         await session_manager._store.update_session_field(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
@@ -2958,92 +1804,34 @@ async def run_agent(
                         )
                     blocks = [
                         _build_skill_param_guard_reply(
-                            s.id, s.param_guard.params, state_map.get(s.id, {})  # pyright: ignore[reportUnknownArgumentType]
+                            s.id, s.param_guard.params, state_map.get(s.id, {}),  # pyright: ignore[reportUnknownArgumentType]
+                            hooks=get_skill_hooks(s),
                         )
                         for s in guards
                         if s.param_guard is not None
                     ]
                     return "\n\n".join(blocks)
-                if (
-                    "nano-banana-image-t8" in locked_skill_ids
-                    and nano_banana_execution_request
-                    and registry.get("bash") is not None
-                ):
-                    nano_state = state_map.get("nano-banana-image-t8", {})
-                    prompt = _strip_inline_image_markdown(
-                        str(nano_state.get("prompt", "")).strip()
-                    )
-                    model_display = str(
-                        nano_state.get(
-                            "__model_display__",
-                            _resolve_nano_banana_model_display(session),
-                        )
-                    ).strip() or _resolve_nano_banana_model_display(session)
-                    ratio = str(nano_state.get("ratio") or "auto").strip() or "auto"
-                    input_paths = _resolve_nano_banana_input_paths(llm_message, session)
-                    mode = "edit" if input_paths else "text"
-                    if input_paths:
-                        session.metadata["last_input_image_paths"] = input_paths
-                        _append_image_reference_history(session.metadata, input_paths)
-                    session.metadata["last_nano_banana_mode"] = mode
-                    session.metadata["last_nano_banana_model_display"] = model_display
-                    if isinstance(nano_state, dict):
-                        nano_state["__last_mode__"] = mode
-                    nano_banana_recommended_command = _build_nano_banana_command(
-                        mode=mode,
-                        model_display=model_display,
-                        prompt=prompt,
-                        input_paths=input_paths,
-                        ratio=ratio,
-                    )
-                    metadata_dirty = True
-
-    if session is not None:
-        pending_raw = session.metadata.get("evomap_pending_choices")
-        if isinstance(pending_raw, dict):
-            options_raw: object = pending_raw.get("options")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
-            options: list[dict[str, str]] = []
-            if isinstance(options_raw, list):
-                for item in options_raw:  # pyright: ignore[reportUnknownVariableType]
-                    if not isinstance(item, dict):
-                        continue
-                    opt: dict[str, object] = item  # pyright: ignore[reportAssignmentType, reportUnknownVariableType]
-                    aid = str(opt.get("asset_id", "")).strip()
-                    summary = str(opt.get("summary", "")).strip()
-                    if not summary and not aid:
-                        continue
-                    options.append({"asset_id": aid, "summary": summary})
-            choice_idx = _extract_evomap_choice_index(message, len(options))
-            if choice_idx is not None and options:
-                selected = options[choice_idx]
-                selected_hint = (
-                    f"【EvoMap 已选方案】\n- {selected['asset_id']}: {selected['summary']}"
-                )
-                extra_memory = (
-                    f"{selected_hint}\n{extra_memory}" if extra_memory.strip() else selected_hint
-                )
-                origin_message = str(pending_raw.get("origin_message", "")).strip()  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
-                if origin_message:
-                    llm_message = (
-                        f"{origin_message}\n"
-                        f"用户已选择方案：{selected['summary']}。\n"
-                        "请按该方案执行。"
-                    )
-                session.metadata.pop("evomap_pending_choices", None)
-                if session_manager is not None:
-                    await session_manager._store.update_session_field(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                        session.id,
-                        metadata=session.metadata,
-                    )
-
-    assistant_name = _DEFAULT_ASSISTANT_NAME
-    if memory_manager is not None:
-        try:
-            current_name = await memory_manager.get_assistant_name()
-            if current_name:
-                assistant_name = current_name
-        except Exception as exc:
-            log.debug("agent.assistant_name_load_failed", session_id=session_id, error=str(exc))
+                # 通用 hooks: 命令构建
+                for _cmd_skill in guards:
+                    _cmd_hooks = get_skill_hooks(_cmd_skill)
+                    if (
+                        _cmd_hooks is not None
+                        and _hooks_execution_request
+                        and registry.get("bash") is not None
+                    ):
+                        _cmd_state = state_map.get(_cmd_skill.id, {})
+                        _recommended_cmd = _cmd_hooks.build_command(_cmd_state, session)
+                        if _recommended_cmd:
+                            _skill_recommended_commands[_cmd_skill.id] = _recommended_cmd
+                            metadata_dirty = True
+        assistant_name = _DEFAULT_ASSISTANT_NAME
+        if memory_manager is not None:
+            try:
+                current_name = await memory_manager.get_assistant_name()
+                if current_name:
+                    assistant_name = current_name
+            except Exception as exc:
+                log.debug("agent.assistant_name_load_failed", session_id=session_id, error=str(exc))
     name_action, requested_name = _detect_assistant_name_update(
         message,
         reset_patterns=_ASSISTANT_NAME_RESET_PATTERNS,
@@ -3121,6 +1909,8 @@ async def run_agent(
     evo_first_mode = evomap_allowed_for_turn and "evomap_fetch" in available_tool_names
     evomap_hint_hit = _extra_memory_has_evomap_hint(extra_memory)
 
+    _DEFERRED_ONLY_TOOLS = {"cron", "reminder"}
+
     if native_tools:
         selected_tool_names = _select_native_tool_names(registry, llm_message)
         selected_tool_names = _force_include_office_edit_tools(
@@ -3135,10 +1925,24 @@ async def run_agent(
             }
         elif evo_first_mode:
             selected_tool_names.add("evomap_fetch")
-        if nano_banana_recommended_command:
-            for _nb_tool in ("bash", "reminder", "cron"):
-                if _nb_tool in available_tool_names:
-                    selected_tool_names.add(_nb_tool)
+        if _skill_recommended_commands:
+            for _rc_skill_id, _rc_cmd in _skill_recommended_commands.items():
+                _rc_skills = _assembler.route_skills("", forced_skill_ids=[_rc_skill_id])
+                for _rc_s in _rc_skills:
+                    _rc_h = get_skill_hooks(_rc_s)
+                    if _rc_h is not None:
+                        for _extra_t in _rc_h.extra_tool_names():
+                            if _extra_t in available_tool_names:
+                                selected_tool_names.add(_extra_t)
+        if is_deferred and selected_tool_names is not None:
+            selected_tool_names = selected_tool_names & _DEFERRED_ONLY_TOOLS
+            if not selected_tool_names:
+                selected_tool_names = _DEFERRED_ONLY_TOOLS & available_tool_names
+            log.info(
+                "agent.deferred_intent_tool_restriction",
+                session_id=session_id,
+                restricted_to=sorted(selected_tool_names),
+            )
         tool_schemas = registry.to_llm_schemas(include_names=selected_tool_names)
         dropped_names = sorted(available_tool_names - selected_tool_names)
         log.info(
@@ -3154,60 +1958,84 @@ async def run_agent(
     fallback_names: set[str] | None = None
     if not native_tools and not evomap_allowed_for_turn:
         fallback_names = {d.name for d in registry.list_tools() if not d.name.startswith("evomap_")}
+    if is_deferred and fallback_names is not None:
+        fallback_names = fallback_names & _DEFERRED_ONLY_TOOLS
+        if not fallback_names:
+            fallback_names = _DEFERRED_ONLY_TOOLS & available_tool_names
     fallback_text = (
         "" if native_tools else registry.to_prompt_fallback(include_names=fallback_names)
     )
 
     effective_skill_ids = locked_skill_ids or pending_lock_skill_ids or None
+    _model_display = model_id.split("/", 1)[-1] if "/" in model_id else model_id
     system_messages = _assembler.build(
         config,
         llm_message,
         tool_fallback_text=fallback_text,
         assistant_name=assistant_name,
         forced_skill_ids=effective_skill_ids,
+        model_id=model_id,
+        max_context_tokens=ContextWindow.get_max_context(_model_display),
     )
     if lock_is_explicit and locked_skill_ids:
         system_messages.append(_build_skill_lock_system_message(locked_skill_ids))
         if skill_lock_resumed_from_waiting:
             joined_ids = ", ".join(locked_skill_ids)
-            system_messages.append(Message(
-                role="system",
-                content=(
-                    f"用户刚刚发送了新的任务请求，当前仍锁定在 {joined_ids} 技能。\n"
-                    "请立即按照技能规则执行用户的新请求，直接调用工具完成任务。\n"
-                    "禁止输出使用说明、操作指南或功能介绍，直接动手做。"
-                ),
+            _is_confirm_word = bool(re.match(
+                r"^\s*(?:确认|ok|好的?|可以|没问题|就这样|对的?|行|嗯|发吧|开始吧|go|开始)\s*[!！。.]*$",
+                llm_message, re.IGNORECASE,
             ))
-        if "nano-banana-image-t8" in locked_skill_ids:
-            current_model = _resolve_nano_banana_model_display(session)
-            system_messages.append(
-                _build_nano_banana_execution_system_message(
-                    current_model,
-                    _recover_recent_session_image_paths(session),
-                )
-            )
-    if nano_banana_recommended_command:
-        system_messages.append(Message(
-            role="system",
-            content=(
-                "nano-banana 生图参数已齐，以下是命令模板（timeout 设为 330）：\n"
-                f"```\n{nano_banana_recommended_command}\n```\n"
-                "使用规则：\n"
-                "1. 如果用户只是要求生图，直接调用 bash 执行上述命令。\n"
-                "2. 如果用户的请求是复合任务（如先写文档再生图），"
-                "请按正确顺序编排：先完成其他步骤，在需要生图时再调用 bash 执行。\n"
-                "3. 你可以根据用户意图调整 --prompt 参数内容"
-                "（只放与生图相关的描述，去掉写文档等无关部分）。\n"
-                "4. 如果用户要多张图，可以多次调用 bash，"
-                "每次修改 --prompt 以生成不同内容。\n"
-                "5. 不可修改的参数：--mode、--model、--edit-model、脚本路径。\n"
-                "6. 如果用户要求延迟执行（如 N分钟后生图），"
-                "请调用 reminder 工具，设置 action='agent'，"
-                "message 填写完整的生图指令（如 用香蕉生图画一只波斯猫），"
-                "这样到时间后会自动触发 agent 执行该任务。\n"
-                "7. 禁止输出命令本身给用户看，直接调用 bash 工具执行。"
-            ),
-        ))
+            if _is_confirm_word:
+                system_messages.append(Message(
+                    role="system",
+                    content=(
+                        f"用户已确认，当前锁定在 {joined_ids} 技能。\n"
+                        "请立即按照技能规则继续执行下一步，直接调用工具完成任务。\n"
+                        "禁止输出使用说明或重复展示已有内容，直接动手做。"
+                    ),
+                ))
+            else:
+                system_messages.append(Message(
+                    role="system",
+                    content=(
+                        f"用户刚刚发送了新的任务请求，当前仍锁定在 {joined_ids} 技能。\n"
+                        "请立即按照技能规则执行用户的新请求，直接调用工具完成任务。\n"
+                        "禁止输出使用说明、操作指南或功能介绍，直接动手做。"
+                    ),
+                ))
+        # 通用 hooks: 执行约束 system message
+        _exec_locked_skills = _assembler.route_skills(llm_message, forced_skill_ids=locked_skill_ids)
+        for _exec_skill in _exec_locked_skills:
+            _exec_hooks = get_skill_hooks(_exec_skill)
+            if _exec_hooks is not None:
+                _exec_msg = _exec_hooks.build_execution_system_message(session)
+                if _exec_msg is not None:
+                    system_messages.append(_exec_msg)
+    # 通用 hooks: 命令模板 system message
+    for _tpl_skill_id, _tpl_cmd in _skill_recommended_commands.items():
+        _tpl_skills = _assembler.route_skills("", forced_skill_ids=[_tpl_skill_id])
+        for _tpl_s in _tpl_skills:
+            _tpl_h = get_skill_hooks(_tpl_s)
+            if _tpl_h is not None:
+                _tpl_msg = _tpl_h.build_command_template_system_message(_tpl_cmd)
+                if _tpl_msg is not None:
+                    system_messages.append(_tpl_msg)
+    # 通用 hooks: 阶段规则 system message
+    if lock_is_explicit and locked_skill_ids and session is not None:
+        _stage_locked_skills = _assembler.route_skills(llm_message, forced_skill_ids=locked_skill_ids)
+        _skill_param_state_raw = session.metadata.get("skill_param_state") or {}
+        for _stage_skill in _stage_locked_skills:
+            _stage_hooks = get_skill_hooks(_stage_skill)
+            if _stage_hooks is None:
+                continue
+            _stage_state = {}
+            if isinstance(_skill_param_state_raw, dict):
+                _stage_state = _skill_param_state_raw.get(_stage_skill.id, {})
+                if not isinstance(_stage_state, dict):
+                    _stage_state = {}
+            for _rule in _stage_hooks.stage_rules:
+                if _rule.condition(_stage_state, llm_message):
+                    system_messages.append(Message(role="system", content=_rule.get_hint(_stage_state, llm_message, session)))
     _append_office_system_hints(system_messages, session, llm_message)
 
     if (
@@ -3247,6 +2075,7 @@ async def run_agent(
     if memory_manager is not None and agent_cfg.memory.enabled:
         _t_memory_start = _time.monotonic()
         memory_cfg = agent_cfg.memory
+        style_directive = ""
         try:
             style_directive = (
                 await memory_manager.get_global_style_directive()
@@ -3332,7 +2161,22 @@ async def run_agent(
     conversation: list[Message] = []
     if session:
         conversation = list(session.messages)
-    conversation.append(Message(role="user", content=llm_message, images=images))
+    current_user_message = Message(role="user", content=llm_message, images=images)
+    if (
+        conversation
+        and conversation[-1].role == "user"
+        and conversation[-1].content == llm_message
+    ):
+        # 某些入口会先把当前用户消息写入 session，再调用 run_agent。
+        # 这里直接替换最后一条，避免把同一轮请求以“无图一次 + 带图一次”重复发送给模型。
+        previous_images = conversation[-1].images
+        conversation[-1] = Message(
+            role="user",
+            content=llm_message,
+            images=images or previous_images,
+        )
+    else:
+        conversation.append(current_user_message)
     conversation_message_count = len(conversation)
 
     if (
@@ -3388,11 +2232,11 @@ async def run_agent(
     total_input = 0
     total_output = 0
     announced_plan = False
-    db_summaries = []
+    db_summaries: list[SummaryRow] = []
     pending_office_paths: list[str] = []
     if session_store and summarizer_cfg.enabled:
         try:
-            db_summaries = await session_store.get_summaries(session_id)
+            db_summaries = await _load_session_summaries_typed(session_store, session_id)
         except Exception as exc:
             log.debug("agent.summaries_load_failed", error=str(exc))
 
@@ -3400,7 +2244,6 @@ async def run_agent(
     invalid_tool_rounds = 0
     empty_reply_rounds = 0
     office_block_bash_probe = False
-    office_loop_guard_enabled = False
     office_block_message = ""
     office_edit_only = False
     office_edit_path = ""
@@ -3408,7 +2251,6 @@ async def run_agent(
         is_office_request = _is_office_edit_request(llm_message) or (
             _is_followup_edit_message(llm_message) and _has_any_last_office_path(session.metadata)
         )
-        office_loop_guard_enabled = is_office_request
         if is_office_request and _has_any_last_office_path(session.metadata):
             office_block_bash_probe = True
             office_block_message = _build_office_path_block_message(session.metadata)
@@ -3424,6 +2266,7 @@ async def run_agent(
 
     round_idx = -1
     successful_tool_calls = 0
+    _cron_reminder_notices: list[str] = []
     browser_locked_by_evomap = evo_first_mode and not evomap_hint_hit
     while total_output < _MAX_OUTPUT_TOKENS:
         round_idx += 1
@@ -3433,29 +2276,42 @@ async def run_agent(
                 "为避免长时间卡住已暂停。请让我改用更直接的编辑方式继续。"
             )
             break
-        if db_summaries:
-            all_messages = _context_window.trim_with_summaries(
-                [*system_messages, *conversation],
-                model_short,
-                db_summaries,
-            )
-        else:
-            all_messages = _context_window.trim(
-                [*system_messages, *conversation],
-                model_short,
-            )
+        _trim_result: TrimResult = _context_window.trim_with_metadata(
+            [*system_messages, *conversation],
+            model_short,
+            summaries=db_summaries or None,  # pyright: ignore[reportUnknownArgumentType]
+        )
+        all_messages = _trim_result.messages
+        if _trim_result.was_truncated and round_idx == 0:
+            all_messages.append(Message(
+                role="system",
+                content=(
+                    f"【上下文截断提示】本会话共 {_trim_result.original_count} 条消息，"
+                    f"因上下文预算限制已省略 {_trim_result.dropped_count} 条较早的消息。"
+                    "如需引用早期内容，请让用户重新提供关键信息。"
+                ),
+            ))
 
         _llm_t0 = _time.monotonic()
         _llm_retries = 0
         _llm_last_err: Exception | None = None
+        response: AgentResponse | None = None
         while _llm_retries <= 2:
             try:
-                response = await router.chat(
-                    model_id,
-                    all_messages,
-                    tools=tool_schemas or None,
-                    on_stream=on_stream,
-                )
+                if on_stream is None:
+                    response = await router.chat(
+                        model_id,
+                        all_messages,
+                        tools=tool_schemas or None,
+                    )
+                else:
+                    stream_handler: StreamCallback = on_stream  # pyright: ignore[reportAssignmentType]
+                    response = await router.chat(
+                        model_id,
+                        all_messages,
+                        tools=tool_schemas or None,
+                        on_stream=stream_handler,
+                    )
                 _llm_last_err = None
                 break
             except ProviderAuthError:
@@ -3466,6 +2322,20 @@ async def run_agent(
                 _llm_last_err = exc
                 _llm_retries += 1
                 if _llm_retries > 2:
+                    # 如果已有部分成功的工具调用结果，保留进度而非直接丢弃
+                    if successful_tool_calls > 0 and final_text_parts:
+                        log.warning(
+                            "agent.llm_exhausted_with_progress",
+                            error=str(exc)[:200],
+                            model=model_id,
+                            successful_tools=successful_tool_calls,
+                            session_id=session_id,
+                        )
+                        final_text_parts.append(
+                            f"\n\n（模型调用出现异常: {str(exc)[:100]}，"
+                            "已完成的部分结果如上。请稍后重试剩余部分。）"
+                        )
+                        break
                     raise
                 log.warning(
                     "agent.llm_retry",
@@ -3475,6 +2345,24 @@ async def run_agent(
                     session_id=session_id,
                 )
                 await asyncio.sleep(1.5 * _llm_retries)
+        if response is None:
+            if _llm_last_err is not None:
+                if successful_tool_calls > 0 and final_text_parts:
+                    log.warning(
+                        "agent.llm_failed_with_progress",
+                        error=str(_llm_last_err)[:200],
+                        model=model_id,
+                        successful_tools=successful_tool_calls,
+                        session_id=session_id,
+                    )
+                    final_text_parts.append(
+                        f"\n\n（模型调用失败: {str(_llm_last_err)[:100]}，"
+                        "已完成的部分结果如上。请稍后重试。）"
+                    )
+                    break
+                raise _llm_last_err
+            final_text_parts.append("我这边没收到模型有效回复。请再发一次需求，我会继续处理。")
+            break
         _llm_ms = int((_time.monotonic() - _llm_t0) * 1000)
         round_input = response.input_tokens
         round_output = response.output_tokens
@@ -3548,7 +2436,7 @@ async def run_agent(
                         ),
                     )
                 )
-                if invalid_tool_rounds >= 2:
+                if invalid_tool_rounds >= MODEL_REPAIR_RETRY_LIMIT:
                     final_text_parts.append("工具调用连续无效，已停止自动重试。请明确参数后重试。")
                     break
                 continue
@@ -3575,7 +2463,7 @@ async def run_agent(
                         ),
                     )
                 )
-                if invalid_tool_rounds >= 2:
+                if invalid_tool_rounds >= MODEL_REPAIR_RETRY_LIMIT:
                     final_text_parts.append(
                         "工具调用参数连续无效，已停止自动重试。请明确参数后重试。"
                     )
@@ -3693,10 +2581,12 @@ async def run_agent(
         conversation.append(assistant_msg)
 
         if session_manager and session:
-            await _persist_message(session_manager, session, "assistant", assistant_persist)
+            session_manager_obj = session_manager
+            session_obj = session
+            await _persist_message(session_manager_obj, session_obj, "assistant", assistant_persist)
             if assistant_content:
                 for office_path in _extract_office_paths(assistant_content):
-                    if _remember_office_path(session.metadata, office_path):
+                    if _remember_office_path(session_obj.metadata, office_path):
                         metadata_dirty = True
 
         for _tname in ("reminder", "cron"):
@@ -3707,8 +2597,14 @@ async def run_agent(
         parallel_nano_batches: dict[int, list[ToolCall]] = {}
         batch_start: int | None = None
         batch_calls: list[ToolCall] = []
+        _ph_skill_ids = locked_skill_ids or pending_lock_skill_ids or []
+        _parallel_hooks: list[SkillHooks] = [
+            h for s in _assembler.route_skills(llm_message, forced_skill_ids=_ph_skill_ids)
+            if (h := get_skill_hooks(s)) is not None
+        ] or get_all_hooks()
         for idx, candidate in enumerate(tool_calls):
-            if _is_parallelizable_nano_banana_bash_call(candidate):
+            _is_parallel = any(h.is_parallelizable_bash_call(candidate) for h in _parallel_hooks)
+            if _is_parallel:
                 if batch_start is None:
                     batch_start = idx
                     batch_calls = [candidate]
@@ -3723,7 +2619,7 @@ async def run_agent(
             parallel_nano_batches[batch_start] = list(batch_calls)
 
         stop_for_evomap_choice = False
-        stop_for_probe_loop = False
+        stop_for_guard_abort = False
         skipped_parallel_tool_ids: set[str] = set()
         for idx, tc in enumerate(tool_calls):
             if tc.id in skipped_parallel_tool_ids:
@@ -3754,7 +2650,7 @@ async def run_agent(
                 batch = parallel_nano_batches[idx]
                 skipped_parallel_tool_ids.update(item.id for item in batch[1:])
                 log.info(
-                    "agent.parallel_nano_banana_batch",
+                    "agent.parallel_skill_batch",
                     round=round_idx,
                     count=len(batch),
                     session_id=session_id,
@@ -3819,39 +2715,46 @@ async def run_agent(
                 if tc.name == "evomap_fetch" and result.success:
                     candidates = _parse_evomap_fetch_candidates(result.output or "")
                     if len(candidates) > 3 and session is not None:
+                        session_obj: Session = session
+                        session_metadata: dict[str, Any] = session_obj.metadata
                         top3 = _pick_top_evomap_candidates(llm_message, candidates, limit=3)
-                        session.metadata["evomap_pending_choices"] = {
+                        session_metadata["evomap_pending_choices"] = {
                             "origin_message": llm_message,
                             "options": [{"asset_id": aid, "summary": summary} for aid, summary in top3],
                         }
                         if session_manager is not None:
                             await session_manager._store.update_session_field(  # noqa: SLF001  # pyright: ignore[reportPrivateUsage]
-                                session.id,
-                                metadata=session.metadata,
+                                session_obj.id,
+                                metadata=session_metadata,
                             )
                         final_text_parts.append(_build_evomap_choice_prompt(top3))
                         stop_for_evomap_choice = True
                         break
                     browser_locked_by_evomap = not _is_no_match_evomap_output(result)
+                _active_skill_hooks: list[SkillHooks] = []
+                if locked_skill_ids:
+                    _active_skill_hooks = [
+                        hook
+                        for skill in _assembler.route_skills("", forced_skill_ids=locked_skill_ids)
+                        if (hook := get_skill_hooks(skill)) is not None
+                    ]
                 guard_update = apply_tool_result_guards(
                     guard_state,
                     tc,
                     result,
-                    office_loop_guard_enabled=office_loop_guard_enabled,
-                    image_api_probe_guard_enabled=image_api_probe_guard_enabled,
                     session_id=session_id,
+                    skill_hooks=_active_skill_hooks or None,
                 )
                 for event in guard_update.log_events:
                     getattr(log, event.level)(event.event, **event.fields)
                 for prompt in guard_update.conversation_messages:
                     conversation.append(Message(role="user", content=prompt))
                 final_text_parts.extend(guard_update.final_texts)
-                if guard_update.stop_for_probe_loop:
-                    stop_for_probe_loop = True
-                    break
 
                 if result.success and result.output:
                     successful_tool_calls += 1
+                    if tc.name in ("cron", "reminder") and "定时任务 +1" in result.output:
+                        _cron_reminder_notices.append(result.output)
                     for path_match in re.finditer(
                         r"(/[^\s]+\.(?:jpg|jpeg|png|gif|webp))", result.output
                     ):
@@ -3894,19 +2797,36 @@ async def run_agent(
                 ):
                     metadata_dirty = True
 
-                if (
-                    session is not None
-                    and tc.name == "bash"
-                    and result.success
-                    and "nano-banana-image-t8" in locked_skill_ids
-                ):
-                    _nb_output = result.output or ""
-                    _nb_image_path = _parse_nano_banana_result_path(_nb_output)
-                    if _nb_image_path and Path(_nb_image_path).expanduser().is_file():
-                        session.metadata["last_generated_image_path"] = _nb_image_path
-                        _append_image_reference_history(
-                            session.metadata, [_nb_image_path]
-                        )
+                if session is not None and tc.name == "bash" and result.success and locked_skill_ids:
+                    _bash_locked_skills = _assembler.route_skills("", forced_skill_ids=locked_skill_ids)
+                    for _bash_skill in _bash_locked_skills:
+                        _bash_hooks = get_skill_hooks(_bash_skill)
+                        if _bash_hooks is None:
+                            continue
+                        _bash_updates = _bash_hooks.on_bash_success(tc, result, session)
+                        if _bash_updates is None:
+                            continue
+                        session_metadata_ref: dict[str, Any] = session.metadata
+                        for _bk, _bv in _bash_updates.items():
+                            if _bk == "__update_skill_param_model__":
+                                skill_param_state = session_metadata_ref.get("skill_param_state")
+                                if isinstance(skill_param_state, dict):
+                                    sp_dict = cast(dict[object, object], skill_param_state)
+                                    ns_obj = sp_dict.get(_bash_skill.id)
+                                    if isinstance(ns_obj, dict):
+                                        ns_obj["__model_display__"] = _bv
+                            elif _bk == "__update_skill_param_mode__":
+                                skill_param_state = session_metadata_ref.get("skill_param_state")
+                                if isinstance(skill_param_state, dict):
+                                    sp_dict = cast(dict[object, object], skill_param_state)
+                                    ns_obj = sp_dict.get(_bash_skill.id)
+                                    if isinstance(ns_obj, dict):
+                                        ns_obj["__last_mode__"] = _bv
+                            elif _bk == "__append_image_reference__":
+                                if isinstance(_bv, list):
+                                    _append_image_reference_history(session_metadata_ref, _bv)
+                            else:
+                                session_metadata_ref[_bk] = _bv
                         metadata_dirty = True
 
                 if session is not None and tc.name in {"ppt_edit", "docx_edit", "xlsx_edit"}:
@@ -3917,6 +2837,52 @@ async def run_agent(
                         and _remember_office_path(session.metadata, arg_path.strip())
                     ):
                         metadata_dirty = True
+
+                # browser type 时缓存标题/正文到 skill_param_state，
+                # 防止跨轮次上下文压缩后 LLM 丢失这些信息
+                if (
+                    session is not None
+                    and tc.name == "browser"
+                    and result.success
+                    and locked_skill_ids
+                ):
+                    _br_action = str(tc.arguments.get("action", "")).strip().lower()
+                    if _br_action == "type":
+                        _br_selector = str(tc.arguments.get("selector", ""))
+                        _br_text = str(tc.arguments.get("text", "")).strip()
+                        if _br_text:
+                            _sel_lower = _br_selector.lower()
+                            # :not(...title...) 是"排除标题"，不应被判为标题
+                            _has_title_kw = (
+                                "标题" in _br_selector or "title" in _sel_lower
+                            )
+                            _is_negated_title = ":not(" in _sel_lower and "title" in _sel_lower
+                            _is_title = _has_title_kw and not _is_negated_title
+                            _is_body = not _is_title and (
+                                "prosemirror" in _sel_lower
+                                or "contenteditable" in _sel_lower
+                                or "tiptap" in _sel_lower
+                            )
+                            _cache_key = (
+                                "__draft_title__" if _is_title
+                                else "__draft_body__" if _is_body
+                                else ""
+                            )
+                            if _cache_key:
+                                _sps = session.metadata.get("skill_param_state")
+                                if isinstance(_sps, dict):
+                                    for _lk_sid in locked_skill_ids:
+                                        _ns = cast(dict[str, object], _sps).get(_lk_sid)
+                                        if isinstance(_ns, dict):
+                                            cast(dict[str, object], _ns)[_cache_key] = _br_text
+                                            metadata_dirty = True
+                                            log.info(
+                                                "agent.browser_field_cached",
+                                                skill=_lk_sid,
+                                                field=_cache_key,
+                                                preview=_br_text[:50],
+                                                session_id=session_id,
+                                            )
 
                 tool_output = _format_tool_output(result)
 
@@ -3934,10 +2900,12 @@ async def run_agent(
                 conversation.append(tool_msg)
 
                 if session_manager and session and not _is_transient_cli_usage_error(result):
+                    session_manager_obj = session_manager
+                    session_obj = session
                     snippet = tool_output[:500] if len(tool_output) > 500 else tool_output
                     await _persist_message(
-                        session_manager,
-                        session,
+                        session_manager_obj,
+                        session_obj,
                         "tool",
                         f"[{tc.name}] {snippet}",
                         tool_call_id=tc_id,
@@ -3950,12 +2918,20 @@ async def run_agent(
                     success=result.success,
                     output_len=len(result.output),
                 )
-            if stop_for_evomap_choice or stop_for_probe_loop:
+                if guard_update.stop_for_repeat_loop:
+                    stop_for_guard_abort = True
+                    break
+            if stop_for_evomap_choice:
                 break
 
         if stop_for_evomap_choice:
             break
-        if stop_for_probe_loop:
+        if stop_for_guard_abort:
+            if metadata_dirty and session is not None and session_manager is not None:
+                session_obj: Session = session
+                session_manager_obj: SessionManager = session_manager
+                await session_manager_obj.update_metadata(session_obj, session_obj.metadata)
+                metadata_dirty = False
             break
         post_round_update = apply_post_round_guards(
             guard_state,
@@ -3969,7 +2945,9 @@ async def run_agent(
             conversation.append(Message(role="user", content=prompt))
         final_text_parts.extend(post_round_update.final_texts)
         if metadata_dirty and session is not None and session_manager is not None:
-            await session_manager.update_metadata(session, session.metadata)
+            session_obj: Session = session
+            session_manager_obj: SessionManager = session_manager
+            await session_manager_obj.update_metadata(session_obj, session_obj.metadata)
             metadata_dirty = False
         if post_round_update.stop_for_repeat_loop:
             break
@@ -3986,18 +2964,23 @@ async def run_agent(
     final_text = "".join(final_text_parts)
     final_text = _fix_image_paths(final_text, real_image_paths)
 
+    if _cron_reminder_notices:
+        _last_notice = _cron_reminder_notices[-1]
+        _count_match = re.search(r"（定时任务 \+1，合计 (\d+)）", _last_notice)
+        if _count_match and f"合计 {_count_match.group(1)}" not in final_text:
+            final_text = f"{final_text}\n（定时任务 +1，合计 {_count_match.group(1)}）"
+
     if lock_is_explicit and locked_skill_ids and skill_announce_pending:
         announce = _skill_announcement(locked_skill_ids, previous_locked_skill_ids)
         final_text = f"{announce}\n\n{final_text}" if final_text else announce
         skill_announce_pending = False
         if session is not None:
-            session.metadata["skill_lock_announce_pending"] = False
+            session_obj: Session = session
+            session_metadata: dict[str, Any] = session_obj.metadata
+            session_metadata["skill_lock_announce_pending"] = False
             metadata_dirty = True
 
-    _lock_confirm_tip = (
-        "如果本轮任务已完成，请回复“任务完成”以解除技能锁定；"
-        "若需继续修改，请直接继续说需求。"
-    )
+    _lock_confirm_tip = "回复“任务完成”以解除技能锁定；若继续修改请直接说需求。"
 
     # Deferred lock: first run completed with auto-routed skills -> lock them now.
     if (
@@ -4006,12 +2989,15 @@ async def run_agent(
         and session is not None
         and successful_tool_calls > 0
     ):
+        session_obj: Session = session
+        session_metadata: dict[str, Any] = session_obj.metadata
         locked_skill_ids = pending_lock_skill_ids
         lock_is_explicit = True
-        session.metadata["locked_skill_ids"] = locked_skill_ids
-        session.metadata["skill_lock_waiting_done"] = True
+        session_metadata["locked_skill_ids"] = locked_skill_ids
+        session_metadata["skill_lock_waiting_done"] = True
         metadata_dirty = True
-        final_text = f"{final_text}\n\n{_lock_confirm_tip}" if final_text else _lock_confirm_tip
+        if not _contains_lock_confirm_tip(final_text):
+            final_text = f"{final_text}\n{_lock_confirm_tip}" if final_text else _lock_confirm_tip
 
     # Explicit lock: require user confirmation to release after successful tool use.
     elif (
@@ -4021,22 +3007,27 @@ async def run_agent(
         and successful_tool_calls > 0
         and not lock_waiting_done
     ):
-        session.metadata["locked_skill_ids"] = locked_skill_ids
-        session.metadata["skill_lock_waiting_done"] = True
+        session_obj: Session = session
+        session_metadata: dict[str, Any] = session_obj.metadata
+        session_metadata["locked_skill_ids"] = locked_skill_ids
+        session_metadata["skill_lock_waiting_done"] = True
         metadata_dirty = True
         if has_skill_queue and _skill_queue_has_next(skill_queue, skill_queue_index):
             if skill_queue_index < len(skill_queue):
                 skill_queue[skill_queue_index]["status"] = "done"
-                session.metadata["skill_queue"] = skill_queue
+                session_metadata["skill_queue"] = skill_queue
             _q_advance_tip = _build_skill_queue_advance_message(
                 skill_queue, skill_queue_index,
             )
             final_text = f"{final_text}\n\n{_q_advance_tip}" if final_text else _q_advance_tip
         else:
-            final_text = f"{final_text}\n\n{_lock_confirm_tip}" if final_text else _lock_confirm_tip
+            if not _contains_lock_confirm_tip(final_text):
+                final_text = f"{final_text}\n{_lock_confirm_tip}" if final_text else _lock_confirm_tip
 
     if metadata_dirty and session is not None and session_manager is not None:
-        await session_manager.update_metadata(session, session.metadata)
+        session_obj: Session = session
+        session_manager_obj: SessionManager = session_manager
+        await session_manager_obj.update_metadata(session_obj, session_obj.metadata)
 
     # Background: generate L0/L1 summaries for older messages if needed
     if (
@@ -4085,16 +3076,28 @@ async def run_agent(
         except Exception as exc:
             log.debug("agent.bg_compress_prep_failed", error=str(exc))
 
+    _done_rounds = max(0, round_idx + 1)
     log.info(
         "agent.done",
         model=model_id,
-        llm_rounds=max(0, round_idx + 1),
+        llm_rounds=_done_rounds,
         input_tokens=total_input,
         output_tokens=total_output,
         session_id=session_id,
         trigger_event_id=trigger_event_id,
         trigger_preview=trigger_preview,
     )
+
+    if on_done is not None:
+        try:
+            await on_done(AgentDoneInfo(
+                model=model_id,
+                input_tokens=total_input,
+                output_tokens=total_output,
+                llm_rounds=_done_rounds,
+            ))
+        except Exception:
+            log.debug("agent.on_done_callback_failed", session_id=session_id)
 
     if session_store and total_input + total_output > 0:
         try:
@@ -4179,4 +3182,12 @@ async def run_agent(
                     session_id=session_id,
                 )
 
+    final_text = _cleanup_final_reply_text(final_text)
+    if locked_skill_ids:
+        _pp_skills = _assembler.route_skills("", forced_skill_ids=locked_skill_ids)
+        for _pp_skill in _pp_skills:
+            _pp_hooks = get_skill_hooks(_pp_skill)
+            if _pp_hooks is not None:
+                final_text = _pp_hooks.postprocess_reply(final_text, session)
+    final_text = _canonicalize_lock_confirm_tip(final_text, _lock_confirm_tip)
     return final_text

@@ -211,6 +211,23 @@ class RoutingConfig(BaseModel):
     rules: list[RoutingRuleConfig] = Field(default_factory=list)
 
 
+class BrowserConfig(BaseModel):
+    """Browser tool configuration.
+
+    mode="launch"  — 启动全新 Chrome 实例（默认，用于搜图等不需要登录态的场景）
+    mode="cdp"     — 通过 CDP 连接到已有 Chrome（用于接管用户已登录的浏览器）
+
+    CDP 模式使用方法：
+    1. 用 ``启动Claw辅助浏览器.command`` 启动带调试端口的 Chrome
+    2. 在该浏览器中手动登录目标网站
+    3. WhaleClaw 通过 cdp_url 接管操作
+    """
+
+    mode: Literal["launch", "cdp"] = "launch"
+    cdp_url: str = "http://localhost:9222"
+    visible: bool = True
+
+
 class WhaleclawConfig(BaseModel):
     """Root configuration model."""
 
@@ -220,4 +237,5 @@ class WhaleclawConfig(BaseModel):
     channels: ChannelsConfig = Field(default_factory=ChannelsConfig)
     security: SecurityConfig = Field(default_factory=SecurityConfig)
     routing: RoutingConfig = Field(default_factory=RoutingConfig)
+    browser: BrowserConfig = Field(default_factory=BrowserConfig)
     plugins: dict[str, dict[str, object]] = Field(default_factory=dict)

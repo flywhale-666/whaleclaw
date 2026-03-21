@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -72,21 +72,29 @@ class FeishuClient:
             raise RuntimeError(msg)
         self._tenant_access_token = data["tenant_access_token"]
         self._token_expires_at = time.time() + data.get("expire", 7200) - 60
-        return self._tenant_access_token
+        return cast(str, self._tenant_access_token)
 
     async def request(
         self, method: str, path: str, **kwargs: Any
     ) -> dict[str, Any]:
         """Make an authenticated API request."""
         token = await self._ensure_token()
-        headers = {
+        extra_headers = kwargs.pop("headers", None)
+        merged_headers: dict[str, str] = {
             "Authorization": f"Bearer {token}",
-            **(kwargs.pop("headers", None) or {}),
         }
+        if isinstance(extra_headers, dict):
+            extra_headers_dict = cast(dict[object, object], extra_headers)
+            merged_headers.update(
+                {
+                    str(key): str(value)
+                    for key, value in extra_headers_dict.items()
+                }
+            )
         resp = await self._request_with_retry(
             method,
             f"{_BASE}{path}",
-            headers=headers,
+            headers=merged_headers,
             **kwargs,
         )
         data: dict[str, Any] = resp.json()
@@ -116,6 +124,27 @@ class FeishuClient:
             "POST",
             f"/im/v1/messages/{message_id}/reply",
             json={"msg_type": msg_type, "content": content},
+        )
+
+    async def create_message_reaction(
+        self,
+        message_id: str,
+        emoji_type: str,
+    ) -> dict[str, Any]:
+        return await self.request(
+            "POST",
+            f"/im/v1/messages/{message_id}/reactions",
+            json={"reaction_type": {"emoji_type": emoji_type}},
+        )
+
+    async def delete_message_reaction(
+        self,
+        message_id: str,
+        reaction_id: str,
+    ) -> dict[str, Any]:
+        return await self.request(
+            "DELETE",
+            f"/im/v1/messages/{message_id}/reactions/{reaction_id}",
         )
 
     async def update_message(

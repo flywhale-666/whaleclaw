@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import shutil
 import time
 from collections.abc import AsyncIterator
@@ -313,6 +314,41 @@ def create_app(config: WhaleclawConfig) -> FastAPI:
     store = SessionStore()
     cron_store = CronStore(_CRON_DB_PATH)
 
+    async def _feishu_send_rich_reply(
+        channel: Any, peer_id: str, reply: str,
+    ) -> None:
+        """推送 agent 回复到飞书，正确处理图片和文件。"""
+        bot = getattr(channel, "bot", None)
+        client = getattr(channel, "client", None)
+        if bot is None or client is None:
+            return
+        text_content, image_paths, file_paths = bot.prepare_reply_payload(reply)
+        if text_content:
+            await client.send_message(
+                peer_id,
+                "text",
+                json.dumps({"text": text_content}, ensure_ascii=False),
+            )
+        for img_path in image_paths:
+            await bot._send_image_to_peer(peer_id, img_path)  # noqa: SLF001
+        for fp in file_paths:
+            await bot._send_file_to_peer(peer_id, fp)  # noqa: SLF001
+
+    _DEFERRED_TIME_PREFIX_RE = re.compile(
+        r"^\s*"
+        r"(?:"
+        r"\d+\s*(?:分钟|小时|秒|min|hour|h)\s*(?:后|之后|以后)"
+        r"|"
+        r"(?:今天|明天|后天)?\s*(?:今晚|明早|早上|上午|中午|下午|晚上|凌晨|傍晚)?"
+        r"\s*\d{1,2}\s*[点时:：]\s*(?:半|\d{0,2})"
+        r")"
+        r"\s*",
+    )
+
+    def _strip_deferred_time_prefix(text: str) -> str:
+        """去掉 '10分钟后' / '晚上10点半' 等时间前缀，只保留要执行的任务内容。"""
+        return _DEFERRED_TIME_PREFIX_RE.sub("", text).strip() or text
+
     async def _on_cron_fire(job_id: str, action: CronAction) -> None:
         if action.type == "message":
             session_id = action.target
@@ -363,21 +399,31 @@ def create_app(config: WhaleclawConfig) -> FastAPI:
                 return
 
             notice = f"⏰ 定时任务触发：{text}"
-            await push_to_session(session_id, make_message(session_id, notice))
+            notice_pushed = await push_to_session(session_id, make_message(session_id, notice))
+            if not notice_pushed:
+                await broadcast_all(make_message(session_id, notice))
+            if not notice_pushed and feishu_channel is not None:
+                if session.channel == "feishu" and feishu_channel.client:
+                    await feishu_channel.client.send_message(
+                        session.peer_id,
+                        "text",
+                        json.dumps({"text": notice}, ensure_ascii=False),
+                    )
             if session_manager is not None:
                 await session_manager.add_message(session, "user", text)
 
             registry = state.get("registry")
             memory_manager = state.get("memory_manager")
-            session_store_ref: SessionStore | None = store  # noqa: F841
             group_compressor = state.get("group_compressor")
+            cron_router = ModelRouter(config.models)
+            task_text = _strip_deferred_time_prefix(text)
             try:
                 reply = await run_agent(
-                    message=text,
+                    message=task_text,
                     session_id=session.id,
                     config=config,
                     session=session,
-                    router=router,
+                    router=cron_router,
                     registry=registry,
                     session_manager=session_manager,
                     session_store=store,
@@ -386,16 +432,14 @@ def create_app(config: WhaleclawConfig) -> FastAPI:
                 )
                 if reply.strip() and session_manager is not None:
                     await session_manager.add_message(session, "assistant", reply)
-                await push_to_session(session_id, make_message(session_id, reply))
-                pushed = await push_to_session(session_id, make_message(session_id, ""))
-                if not pushed:
+                reply_pushed = await push_to_session(session_id, make_message(session_id, reply))
+                await push_to_session(session_id, make_message(session_id, ""))
+                if not reply_pushed:
                     await broadcast_all(make_message(session_id, reply))
-                if not pushed and feishu_channel is not None:
+                if not reply_pushed and feishu_channel is not None:
                     if session.channel == "feishu" and feishu_channel.client:
-                        await feishu_channel.client.send_message(
-                            session.peer_id,
-                            "text",
-                            json.dumps({"text": reply}, ensure_ascii=False),
+                        await _feishu_send_rich_reply(
+                            feishu_channel, session.peer_id, reply,
                         )
             except Exception as exc:
                 import structlog

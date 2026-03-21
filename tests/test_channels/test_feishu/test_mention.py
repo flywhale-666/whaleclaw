@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from whaleclaw.channels.feishu.mention import (
     format_mention_for_card,
     format_mention_for_text,
@@ -20,7 +22,7 @@ class TestMention:
         assert is_bot_mentioned(message, "ou_bot123")
 
     def test_is_bot_mentioned_false(self) -> None:
-        message = {"mentions": []}
+        message: dict[str, Any] = {"mentions": []}
         assert not is_bot_mentioned(message, "ou_bot123")
 
     def test_strip_bot_mention(self) -> None:

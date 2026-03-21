@@ -17,6 +17,7 @@ from whaleclaw.agent.helpers.tool_execution import (
     is_transient_cli_usage_error as _is_transient_cli_usage_error,
 )
 from whaleclaw.agent.single_agent import (
+    AgentDoneInfo,
     is_multi_agent_confirm,
     is_multi_agent_discuss_done,
     run_agent,
@@ -26,6 +27,7 @@ from whaleclaw.config.schema import WhaleclawConfig
 from whaleclaw.gateway.protocol import (
     MessageType,
     WSMessage,
+    make_agent_done,
     make_error,
     make_message,
     make_pong,
@@ -481,7 +483,7 @@ async def websocket_handler(
             if ws_alive_fn():
                 await _safe_send(
                     websocket,
-                    make_tool_result(_sid, name, result.output, result.success),
+                    make_tool_result(_sid, name, result.output, result.success, result.error),
                 )
 
         async def on_round_result_cb(
@@ -495,6 +497,22 @@ async def websocket_handler(
             round_msg = f"第 {round_no} 轮交付\n\n{content_text}".strip()
             await session_manager.add_message(_session, "assistant", round_msg)
             await _safe_send(websocket, make_message(_sid, round_msg))
+
+        async def on_done_cb(
+            info: AgentDoneInfo,
+            _sid: str = sid,
+        ) -> None:
+            if ws_alive_fn():
+                await _safe_send(
+                    websocket,
+                    make_agent_done(
+                        _sid,
+                        model=info.model,
+                        input_tokens=info.input_tokens,
+                        output_tokens=info.output_tokens,
+                        llm_rounds=info.llm_rounds,
+                    ),
+                )
 
         async def _clear_self_heal_retries() -> None:
             if _SELF_HEAL_RETRY_KEY not in session.metadata:
@@ -598,6 +616,7 @@ async def websocket_handler(
                 on_tool_call=on_tool_call_cb,
                 on_tool_result=on_tool_result_cb,
                 on_round_result=on_round_result_cb,
+                on_done=on_done_cb,
                 images=images or None,
                 session_manager=session_manager,
                 session_store=session_store,
@@ -686,7 +705,7 @@ async def websocket_handler(
             async def on_tool_result_bg(name: str, result: ToolResult) -> None:
                 if entry:
                     await entry.emit(
-                        make_tool_result(sid, name, result.output, result.success)
+                        make_tool_result(sid, name, result.output, result.success, result.error)
                     )
 
             async def on_round_result_bg(round_no: int, content_text: str) -> None:

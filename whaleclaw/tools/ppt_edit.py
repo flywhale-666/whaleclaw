@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
+from pptx.oxml.ns import qn
+
 from whaleclaw.tools.base import Tool, ToolDefinition, ToolParameter, ToolResult
 from whaleclaw.tools.deps import ensure_tool_dep
 
@@ -76,7 +78,8 @@ class PptEditTool(Tool):
         return ToolDefinition(
             name="ppt_edit",
             description=(
-                "修改现有 PPT（.pptx）：支持新增页面（add_slide）、文本替换、标题更新、"
+                "修改现有 PPT（.pptx）：支持新增页面（add_slide）、删除页面（delete_slide）、"
+                "读取页面内容（read_slide）、文本替换、标题更新、"
                 "商务风格、背景色、备注、"
                 "插图（add_image 新增图片；replace_image 替换已有图片，保持原位置尺寸；"
                 "remove_image 删除图片）。换图/替换封面图请用 replace_image。"
@@ -88,12 +91,15 @@ class PptEditTool(Tool):
                     name="action",
                     type="string",
                     description=(
-                        "操作类型：add_slide|replace_text|set_title|set_notes|set_background"
+                        "操作类型：add_slide|delete_slide|read_slide|replace_text|set_title"
+                        "|set_notes|set_background"
                         "|add_image|replace_image|remove_image|apply_business_style"
                     ),
                     required=False,
                     enum=[
                         "add_slide",
+                        "delete_slide",
+                        "read_slide",
                         "replace_text",
                         "set_title",
                         "set_notes",
@@ -241,6 +247,59 @@ class PptEditTool(Tool):
                 success=True,
                 output=f"已在 {path} 末尾新增第 {new_page_no} 页{suffix}",
             )
+
+        if action == "delete_slide":
+            total = len(prs.slides)
+            if slide_index > total:
+                return ToolResult(
+                    success=False, output="",
+                    error=f"页码越界: slide_index={slide_index}, 总页数={total}",
+                )
+            if total <= 1:
+                return ToolResult(
+                    success=False, output="",
+                    error="PPT 至少需要保留 1 页，无法删除唯一的页面",
+                )
+            sld_id = prs.slides._sldIdLst[slide_index - 1]  # pyright: ignore[reportPrivateUsage]
+            rId = sld_id.get(qn("r:id"))
+            if not isinstance(rId, str) or not rId:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=f"无法定位第 {slide_index} 页的关系 ID，删除失败",
+                )
+            prs.part.drop_rel(rId)
+            del prs.slides._sldIdLst[slide_index - 1]  # pyright: ignore[reportPrivateUsage]
+            try:
+                prs.save(str(path))
+            except Exception as exc:
+                return ToolResult(success=False, output="", error=f"PPT 保存失败: {exc}")
+            return ToolResult(
+                success=True,
+                output=f"已删除 {path} 第 {slide_index} 页（原共 {total} 页，现 {total - 1} 页）",
+            )
+
+        if action == "read_slide":
+            total = len(prs.slides)
+            if slide_index > total:
+                return ToolResult(
+                    success=False, output="",
+                    error=f"页码越界: slide_index={slide_index}, 总页数={total}",
+                )
+            slide = prs.slides[slide_index - 1]
+            lines: list[str] = [f"第 {slide_index}/{total} 页内容："]
+            for i, shape in enumerate(slide.shapes, 1):
+                shape_type = getattr(shape, "shape_type", None)
+                is_pic = shape_type == MSO_SHAPE_TYPE.PICTURE
+                text = getattr(shape, "text", "").strip()
+                if is_pic:
+                    lines.append(f"  [{i}] 图片 ({shape.width}x{shape.height})")
+                elif text:
+                    preview = text[:200] + "..." if len(text) > 200 else text
+                    lines.append(f"  [{i}] {preview}")
+            if len(lines) == 1:
+                lines.append("  （空页，无内容元素）")
+            return ToolResult(success=True, output="\n".join(lines))
 
         if slide_index > len(prs.slides):
             return ToolResult(

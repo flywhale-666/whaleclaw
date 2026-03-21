@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import os
+import sys
 import shutil
 import socket
 import subprocess
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from whaleclaw.config.paths import WORKSPACE_DIR
+from whaleclaw.skills.hooks import DefaultSkillHooks, SkillHooks, register_hooks
 from whaleclaw.skills.parser import Skill, SkillParser
 from whaleclaw.skills.router import SkillRouter
 from whaleclaw.utils.log import get_logger
@@ -21,16 +25,45 @@ _BUNDLED_DIR = Path(__file__).resolve().parent / "bundled"
 _USER_SKILLS_DIR = WORKSPACE_DIR / "skills"
 _DEFAULT_SKILLS_DIRS = [_BUNDLED_DIR, _USER_SKILLS_DIR]
 
-
-def _estimate_tokens(text: str) -> int:
-    return max(1, len(text) // 3)
+_DYNAMIC_BUDGET = 6000
 
 
-def _truncate_to_tokens(text: str, max_tokens: int) -> str:
-    approx = max_tokens * 4
-    if len(text) <= approx:
-        return text
-    return text[:approx].rsplit(maxsplit=1)[0] + "..."
+def _load_hooks(skill_dir: Path, skill_id: str) -> SkillHooks | None:
+    """尝试从技能目录加载 hooks.py，优先技能自身目录，再查 bundled。"""
+    candidates = [
+        skill_dir / "hooks.py",
+        _BUNDLED_DIR / skill_id / "hooks.py",
+    ]
+    for hooks_path in candidates:
+        if not hooks_path.is_file():
+            continue
+        try:
+            mod_name = f"whaleclaw.skills.hooks.{skill_id}"
+            sys.modules.pop(mod_name, None)
+            spec = importlib.util.spec_from_file_location(
+                mod_name,
+                hooks_path,
+            )
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            hooks_cls: Any = getattr(module, "Hooks", None)
+            if hooks_cls is not None:
+                instance = hooks_cls()
+                if isinstance(instance, (SkillHooks, DefaultSkillHooks)):
+                    register_hooks(instance)
+                    return instance
+        except Exception as exc:
+            log.warning(
+                "skill.hooks_load_failed",
+                skill_id=skill_id,
+                path=str(hooks_path),
+                error=str(exc),
+            )
+    return None
+
+
 
 
 class SkillManager:
@@ -52,7 +85,11 @@ class SkillManager:
                 continue
             for path in d.rglob("SKILL.md"):
                 with contextlib.suppress(Exception):
-                    skills.append(self._parser.parse(path))
+                    skill = self._parser.parse(path)
+                    hooks = _load_hooks(path.parent, skill.id)
+                    if hooks is not None:
+                        skill.hooks = hooks
+                    skills.append(skill)
         return skills
 
     def get_routed_skills(
@@ -78,29 +115,43 @@ class SkillManager:
                 return [forced_skill]
         return self._router.route(user_message, available)
 
-    def format_for_prompt(self, skills: list[Skill], budget: int) -> str:
-        """Format skills for prompt injection within token budget."""
+    def format_for_prompt(
+        self,
+        skills: list[Skill],
+        total_budget: int = _DYNAMIC_BUDGET,
+    ) -> str:
+        """Format skills for prompt injection with budget control.
+
+        Args:
+            skills: 本轮匹配到的技能列表。
+            total_budget: 所有技能共享的 token 总预算（默认 _DYNAMIC_BUDGET）。
+
+        预算分配：total_budget 平均分给 N 个技能，每个技能实际注入量 =
+        min(分到的预算, 该技能 max_tokens)。超出部分硬截断（按字符，1 token ≈ 4 字符）。
+        """
         if not skills:
             return ""
 
-        if len(skills) == 1:
-            s = skills[0]
-            cap = min(budget, s.max_tokens)
+        n = len(skills)
+        per_skill_budget = total_budget // n
+
+        parts: list[str] = []
+        for s in skills:
             block = f"## 技能: {s.name}\n\n{s.instructions}"
             if s.examples:
                 block += "\n\n### 示例\n" + "\n".join(s.examples)
-            return _truncate_to_tokens(block, cap)
-
-        share = budget // len(skills)
-        parts: list[str] = []
-        for s in skills:
-            cap = min(share, s.max_tokens)
-            block = f"## 技能: {s.name}\n\n{s.instructions}"
-            if s.examples and _estimate_tokens(block) < cap:
-                remaining = cap - _estimate_tokens(block)
-                ex = "\n".join(s.examples)
-                block += "\n\n### 示例\n" + _truncate_to_tokens(ex, remaining)
-            parts.append(_truncate_to_tokens(block, cap))
+            cap_tokens = min(per_skill_budget, s.max_tokens)
+            char_cap = cap_tokens * 4
+            if len(block) > char_cap:
+                block = block[:char_cap]
+                log.info(
+                    "skill.prompt_truncated",
+                    skill_id=s.id,
+                    original_chars=len(f"## 技能: {s.name}\n\n{s.instructions}"),
+                    cap_tokens=cap_tokens,
+                    cap_chars=char_cap,
+                )
+            parts.append(block)
         return "\n\n---\n\n".join(parts)
 
     def list_installed(self) -> list[Skill]:

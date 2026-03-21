@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from pathlib import Path
 
 import pytest
 
@@ -23,11 +24,9 @@ def test_estimate_cost_unknown() -> None:
 
 
 @pytest.mark.asyncio
-async def test_record_and_query(tmp_path: object) -> None:
+async def test_record_and_query(tmp_path: Path) -> None:
     """Open tracker, record usage, query session usage, verify totals."""
-    from pathlib import Path
-
-    db_path = Path(tmp_path) / "usage.db"
+    db_path = tmp_path / "usage.db"
     tracker = UsageTracker(db_path)
     await tracker.open()
     try:
@@ -50,11 +49,9 @@ async def test_record_and_query(tmp_path: object) -> None:
 
 
 @pytest.mark.asyncio
-async def test_daily_usage(tmp_path: object) -> None:
+async def test_daily_usage(tmp_path: Path) -> None:
     """Record and query by date."""
-    from pathlib import Path
-
-    db_path = Path(tmp_path) / "usage.db"
+    db_path = tmp_path / "usage.db"
     tracker = UsageTracker(db_path)
     await tracker.open()
     try:

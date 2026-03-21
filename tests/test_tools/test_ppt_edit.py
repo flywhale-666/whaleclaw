@@ -93,6 +93,31 @@ async def test_ppt_edit_add_image(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_ppt_edit_delete_slide(tmp_path) -> None:
+    from pptx import Presentation
+
+    ppt_path = tmp_path / "delete-slide.pptx"
+    prs = Presentation()
+    slide1 = prs.slides.add_slide(prs.slide_layouts[0])
+    slide1.shapes.title.text = "第一页"
+    slide2 = prs.slides.add_slide(prs.slide_layouts[0])
+    slide2.shapes.title.text = "第二页"
+    prs.save(str(ppt_path))
+
+    tool = PptEditTool()
+    result = await tool.execute(
+        path=str(ppt_path),
+        slide_index=2,
+        action="delete_slide",
+    )
+    assert result.success is True
+
+    prs2 = Presentation(str(ppt_path))
+    assert len(prs2.slides) == 1
+    assert prs2.slides[0].shapes.title.text == "第一页"
+
+
+@pytest.mark.asyncio
 async def test_ppt_edit_apply_business_style_restyles_dark_bar(tmp_path) -> None:
     from pptx import Presentation
     from pptx.dml.color import RGBColor

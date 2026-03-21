@@ -17,6 +17,8 @@ _BUNDLED_SKILLS_DIR = Path(__file__).resolve().parent / "bundled"
 class Skill(BaseModel):
     """Skill parsed from SKILL.md."""
 
+    model_config = {"arbitrary_types_allowed": True}
+
     id: str
     name: str
     triggers: list[str] = Field(default_factory=list)
@@ -24,11 +26,12 @@ class Skill(BaseModel):
     instructions: str
     tools: list[str] = Field(default_factory=list)
     examples: list[str] = Field(default_factory=list)
-    max_tokens: int = 800
+    max_tokens: int = 6000
     lock_session: bool = False
     is_user_installed: bool = False
     param_guard: SkillParamGuard | None = None
     source_path: Path
+    hooks: Any = None
 
 
 class SkillParamItem(BaseModel):
@@ -163,7 +166,7 @@ class SkillParser:
             triggers = [str(t) for t in cast(list[Any], raw_triggers)]
         else:
             triggers = []
-        max_tokens = int(frontmatter.get("max_tokens") or 800)
+        max_tokens = int(frontmatter.get("max_tokens") or 6000)
         lock_session = bool(
             frontmatter.get("lock_session", frontmatter.get("conversation_lock", False))
         )

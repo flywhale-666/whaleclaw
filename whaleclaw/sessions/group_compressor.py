@@ -121,6 +121,36 @@ def _build_recent_raw_block(items: list[tuple[int, list[Message]]]) -> str:
     return "\n".join(lines)
 
 
+_TOOL_CONTENT_CAP = 600
+
+
+def _compact_tool_content(content: str) -> str:
+    """裁剪工具结果：保留文件路径和关键摘要，截断过长输出。"""
+    if len(content) <= _TOOL_CONTENT_CAP:
+        return content
+    return content[:_TOOL_CONTENT_CAP].rstrip() + "\n…（已截断）"
+
+
+def _compact_prev_group(group: list[Message]) -> list[Message]:
+    """对前 4 轮做消息级裁剪：保留结构和 images，只缩短工具/长 assistant 文本。"""
+    out: list[Message] = []
+    for msg in group:
+        if msg.role == "user":
+            out.append(msg)
+            continue
+        if msg.role == "tool":
+            out.append(msg.model_copy(update={"content": _compact_tool_content(msg.content)}))
+            continue
+        if msg.role == "assistant" and msg.images:
+            out.append(msg)
+            continue
+        if msg.role == "assistant" and len(msg.content) > _TOOL_CONTENT_CAP:
+            out.append(msg.model_copy(update={"content": _compact_tool_content(msg.content)}))
+            continue
+        out.append(msg)
+    return out
+
+
 def _build_task_status_block(current_group_idx: int, current_group: list[Message]) -> str:
     latest_user = _extract_latest_user_text(current_group)
     progress = _build_current_progress_lines(current_group)
@@ -404,22 +434,31 @@ class SessionGroupCompressor:
             history_block = _clip_text(history_block, 520)
 
         if not recent_l2_items:
-            # Fallback: keep latest group raw to preserve current-turn semantics.
             recent_l2_items.append((plan[-1].group_idx, plan[-1].group))
 
         current_group_idx, current_group = recent_l2_items[-1]
-        recent_raw_items = list(reversed(recent_l2_items[-(RECENT_RAW_PREV_GROUPS + 1):]))
-        if recent_raw_items:
-            recent_block = _build_recent_raw_block(recent_raw_items)
-            recent_block = _clip_text(recent_block, 520)
-            if recent_block:
-                rendered.append([Message(role="assistant", content=recent_block)])
+
+        if history_block:
+            rendered.append([Message(role="assistant", content=history_block)])
+
+        prev_items = recent_l2_items[:-1]
+        for _gidx, prev_group in prev_items:
+            rendered.append(_compact_prev_group(prev_group))
 
         status_block = _build_task_status_block(current_group_idx, current_group)
         if status_block:
             rendered.append([Message(role="assistant", content=status_block)])
-        if history_block:
-            rendered.append([Message(role="assistant", content=history_block)])
+
+        rendered.append(current_group)
+
+        current_has_images = any(m.images for m in current_group)
+        if current_has_images:
+            log.debug(
+                "group_compressor.current_turn_images_preserved",
+                session_id=session_id,
+                group_idx=current_group_idx,
+                image_messages=sum(1 for m in current_group if m.images),
+            )
 
         pre_truncate_tokens = sum(_group_tokens(g) for g in rendered)
         out = self._truncate_group_atomic(rendered)

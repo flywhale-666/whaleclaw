@@ -133,7 +133,7 @@ def test_rewrite_nano_banana_batches_normalizes_direct_script_line(
         ]
     )
 
-    rewritten = bash_mod._rewrite_nano_banana_batches(command)
+    rewritten = bash_mod._rewrite_long_running_batches(command)
 
     assert f"{fake_python} /tmp/test_nano_banana_2.py --mode text --prompt 'a'" in rewritten
     assert "echo before" in rewritten
@@ -145,7 +145,7 @@ def test_rewrite_nano_banana_batches_splits_into_parallel_chunks_of_five() -> No
         f"./python/bin/python3.12 /tmp/test_nano_banana_{i}.py --mode text --prompt '{i}'"
         for i in range(7)
     ]
-    rewritten = bash_mod._rewrite_nano_banana_batches("\n".join(lines))
+    rewritten = bash_mod._rewrite_long_running_batches("\n".join(lines))
 
     assert rewritten.count('__wc_nb_pids=""') == 2
     assert rewritten.count("( ./python/bin/python3.12 /tmp/test_nano_banana_") == 7

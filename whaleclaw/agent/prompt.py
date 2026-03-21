@@ -1,8 +1,8 @@
-"""PromptAssembler — layered system prompt builder with token budgeting.
+"""PromptAssembler — layered system prompt builder.
 
 Architecture:
-- Static layer (~150 tokens): core identity, always injected
-- Dynamic layer (0~800 tokens): skills routed by user message keywords
+- Static layer: core identity, always injected (cacheable)
+- Dynamic layer: skills routed by user message keywords, injected in full
 - Fallback layer: tool descriptions for providers without native tools API
 
 Tool JSON Schemas are passed via the LLM API ``tools`` parameter (not in
@@ -43,8 +43,10 @@ _STATIC_PROMPT_TEMPLATE = """\
 你是 {assistant_name}，一个运行在用户本地电脑上的 AI 助手。
 - 使用用户的语言回复，简洁准确
 - 你拥有多种工具（bash、文件读写、浏览器、定时任务、技能管理等），能做就做，不要说"我无法"
+- 设置/查看/删除定时任务时，必须使用内置 cron 或 reminder 工具，禁止用 bash 操作系统 crontab
 - 用 bash 执行网络请求时，curl 必须加 --connect-timeout 5 --max-time 15 防止卡住
 - 用户要求做的事，计划好后就立即调用工具执行，不要等用户确认或给用户出选择题。
+- 用户说"N分钟/小时后做某事"时，这是定时任务，必须调用 reminder 或 cron 工具，不要立即执行该事
 - 工具执行失败时尝试其他方案
 - 下载或生成的图片用 markdown 显示：![描述](文件绝对路径)
 - 生成的其他文件告诉用户绝对路径
@@ -89,14 +91,12 @@ _TOOL_FALLBACK_HEADER = """\
 
 """
 
-_DYNAMIC_BUDGET = 800
-
-
 class PromptAssembler:
-    """Build system prompts within a token budget.
+    """Build system prompts.
 
-    Static layer: core identity (~150 tokens), cached across turns.
-    Dynamic layer: skills routed by SkillManager (0~800 tokens).
+    Static layer: core identity, cached across turns.
+    Dynamic layer: skills routed by SkillManager, injected in full.
+    Awareness layer: runtime metadata (model, context budget) for self-awareness.
     """
 
     def __init__(self, skill_manager: SkillManager | None = None) -> None:
@@ -112,6 +112,8 @@ class PromptAssembler:
         assistant_name: str = _DEFAULT_ASSISTANT_NAME,
         forced_skill_id: str | None = None,
         forced_skill_ids: list[str] | None = None,
+        model_id: str = "",
+        max_context_tokens: int = 0,
     ) -> list[Message]:
         """Assemble system prompt messages.
 
@@ -121,12 +123,13 @@ class PromptAssembler:
             token_budget: Max tokens for the system prompt.
             tool_fallback_text: Tool descriptions for providers without
                 native tools support. Injected into prompt when non-empty.
+            model_id: Current model identifier (for agent self-awareness).
+            max_context_tokens: Model's max context window size.
         """
         parts: list[str] = [self._build_static(config, assistant_name)]
 
         dynamic = self._build_dynamic(
             user_message,
-            _DYNAMIC_BUDGET,
             forced_skill_id,
             forced_skill_ids,
         )
@@ -146,7 +149,21 @@ class PromptAssembler:
         if len(parts) > 1:
             messages.append(Message(role="system", content="\n\n".join(parts[1:])))
 
+        awareness = self._build_awareness(model_id, max_context_tokens)
+        if awareness:
+            messages.append(Message(role="system", content=awareness))
+
         return messages
+
+    @staticmethod
+    def _build_awareness(model_id: str, max_context_tokens: int) -> str:
+        """Awareness layer — inject runtime metadata so agent knows its own capabilities."""
+        if not model_id:
+            return ""
+        parts: list[str] = [f"当前模型: {model_id}"]
+        if max_context_tokens > 0:
+            parts.append(f"上下文窗口: {max_context_tokens:,} tokens")
+        return "【运行时信息】" + " | ".join(parts)
 
     def _build_static(self, config: WhaleclawConfig, assistant_name: str) -> str:
         """Static layer — core identity + safety constitution (~250 tokens), cacheable."""
@@ -159,11 +176,14 @@ class PromptAssembler:
     def _build_dynamic(
         self,
         user_message: str,
-        budget: int,
         forced_skill_id: str | None = None,
         forced_skill_ids: list[str] | None = None,
     ) -> str:
-        """Dynamic layer — skills routed by user message keywords."""
+        """Dynamic layer — skills routed by user message keywords.
+
+        当轮 system prompt 不限制技能注入长度，完整注入匹配到的技能说明。
+        Token 预算控制在历史对话压缩层做，不在这里。
+        """
         skills = self._skill_manager.get_routed_skills(
             user_message,
             forced_skill_id=forced_skill_id,
@@ -171,7 +191,7 @@ class PromptAssembler:
         )
         if not skills:
             return ""
-        return self._skill_manager.format_for_prompt(skills, budget)
+        return self._skill_manager.format_for_prompt(skills)
 
     def route_skill_ids(
         self,

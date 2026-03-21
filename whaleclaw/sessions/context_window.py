@@ -180,6 +180,7 @@ def _compress_l1(msg: Message) -> Message:
         content=f"[L1压缩] {body} ...",
         tool_call_id=msg.tool_call_id,
         tool_calls=msg.tool_calls,
+        images=msg.images,
     )
 
 
@@ -203,6 +204,7 @@ def _compress_l0(msg: Message) -> Message:
         content=f"[L0压缩] {body} ...",
         tool_call_id=msg.tool_call_id,
         tool_calls=msg.tool_calls,
+        images=msg.images,
     )
 
 
@@ -330,6 +332,25 @@ def _keep_recent_groups_with_budget(
     return kept, dropped
 
 
+class TrimResult:
+    """Result of context window trimming with truncation metadata."""
+
+    __slots__ = ("messages", "was_truncated", "dropped_count", "original_count")
+
+    def __init__(
+        self,
+        messages: list[Message],
+        *,
+        was_truncated: bool = False,
+        dropped_count: int = 0,
+        original_count: int = 0,
+    ) -> None:
+        self.messages = messages
+        self.was_truncated = was_truncated
+        self.dropped_count = dropped_count
+        self.original_count = original_count
+
+
 class ContextWindow:
     """Fixed-budget hierarchical context trimmer."""
 
@@ -339,7 +360,7 @@ class ContextWindow:
 
     def trim(self, messages: list[Message], model: str) -> list[Message]:
         del model  # fixed policy does not depend on model max context
-        return self._trim_core(messages, summaries=[])
+        return self._trim_core(messages, summaries=[]).messages
 
     def trim_with_summaries(
         self,
@@ -348,28 +369,43 @@ class ContextWindow:
         summaries: list[SummaryRow],
     ) -> list[Message]:
         del model
-        return self._trim_core(messages, summaries=summaries)
+        return self._trim_core(messages, summaries=summaries).messages
+
+    def trim_with_metadata(
+        self,
+        messages: list[Message],
+        model: str,
+        summaries: list[SummaryRow] | None = None,
+    ) -> TrimResult:
+        """Trim messages and return truncation metadata."""
+        del model
+        return self._trim_core(messages, summaries=summaries or [])
 
     def _trim_core(
         self,
         messages: list[Message],
         *,
         summaries: list[SummaryRow],
-    ) -> list[Message]:
+    ) -> TrimResult:
         system: list[Message] = []
         non_system: list[Message] = []
         for m in messages:
             (system if m.role == "system" else non_system).append(m)
 
+        original_non_system_count = len(non_system)
+
         if not non_system:
-            return system
+            return TrimResult(system, original_count=0)
 
         # User requirement: only cap message content (user/assistant/tool),
         # not system prompt and not tool schema payload in API body.
         non_budget = max(_MIN_CONTENT_BUDGET, TARGET_CONTENT_TOKENS)
 
         if _total_tokens(non_system) <= non_budget:
-            return [*system, *non_system]
+            return TrimResult(
+                [*system, *non_system],
+                original_count=original_non_system_count,
+            )
 
         groups = _group_by_turn(non_system)
         recent_n = min(RECENT_PROTECTED, len(groups))
@@ -437,4 +473,11 @@ class ContextWindow:
 
         trimmed = _repair_tool_call_pairs(trimmed)
 
-        return [*system, *trimmed]
+        final_messages = [*system, *trimmed]
+        total_dropped = len(dropped)
+        return TrimResult(
+            final_messages,
+            was_truncated=total_dropped > 0,
+            dropped_count=total_dropped,
+            original_count=original_non_system_count,
+        )

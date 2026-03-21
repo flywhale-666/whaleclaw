@@ -1558,7 +1558,9 @@ createApp({
               (t) => t.name === msg.payload.name && t.loading
             );
             if (tc) {
-              tc.result = msg.payload.output;
+              tc.result = msg.payload.success
+                ? (msg.payload.output || '(empty output)')
+                : `[ERROR] ${msg.payload.error || msg.payload.output || 'unknown error'}`;
               tc.loading = false;
               tc.collapsed = true;
             }

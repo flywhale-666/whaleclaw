@@ -1,4 +1,5 @@
 """Tests for multi-agent effective config resolution."""
+# pyright: reportPrivateUsage=false, reportUnknownMemberType=false
 
 from __future__ import annotations
 
@@ -8,25 +9,31 @@ from typing import Any, cast
 
 import pytest
 
-from whaleclaw.agent.loop import (
-    _attach_rounds_marker,
+from whaleclaw.agent.helpers.office_rules import (
+    extract_delivery_artifact_paths as _extract_delivery_artifact_paths,
+    extract_office_paths as _extract_office_paths,
+    extract_round_delivery_section as _extract_round_delivery_section,
+    snapshot_round_artifacts as _snapshot_round_artifacts,
+    with_round_version_suffix as _with_round_version_suffix,
+)
+from whaleclaw.agent.helpers.tool_execution import (
+    can_auto_create_parent_for_failure as _can_auto_create_parent_for_failure,
+)
+from whaleclaw.agent.multi_agent import (
     _build_multi_agent_requirement_baseline,
-    _can_auto_create_parent_for_failure,
-    _extract_delivery_artifact_paths,
-    _extract_multi_agent_rounds,
-    _extract_office_paths,
     _extract_requested_deliverables,
-    _extract_round_delivery_section,
-    _extract_rounds_marker,
     _looks_like_bad_coordinator_output,
     _looks_like_role_stall_output,
     _need_image_output,
+)
+from whaleclaw.agent.single_agent import (
+    _attach_rounds_marker,
+    _extract_multi_agent_rounds,
+    _extract_rounds_marker,
     _resolve_multi_agent_cfg,
     _scenario_delivery_focus,
     _scenario_discuss_focus,
-    _snapshot_round_artifacts,
     _sync_multi_agent_compression_boundary,
-    _with_round_version_suffix,
     run_agent,
 )
 from whaleclaw.config.schema import WhaleclawConfig

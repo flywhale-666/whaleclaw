@@ -25,6 +25,8 @@ if TYPE_CHECKING:
     from whaleclaw.memory.base import MemoryStore
     from whaleclaw.memory.manager import MemoryManager
 
+from whaleclaw.skills.hooks import SkillHooks as SkillHooksProtocol
+
 log = get_logger(__name__)
 
 _PROJECT_PYTHON = Path(__file__).resolve().parents[3] / "python" / "bin" / "python3.12"
@@ -45,6 +47,13 @@ _NANO_BANANA_MODE_REWRITES = {
     "image2image": "edit",
     "img2img": "edit",
 }
+
+_CRONTAB_CMD_RE = re.compile(r"\bcrontab\b")
+
+
+def _is_crontab_command(command: str) -> bool:
+    """检测 bash 命令是否在操作系统 crontab。"""
+    return bool(_CRONTAB_CMD_RE.search(command))
 
 
 def create_default_registry(
@@ -147,7 +156,7 @@ def parse_fallback_tool_calls(text: str) -> list[ToolCall]:
                 ToolCall(
                     id=f"fallback_{len(calls)}",
                     name=raw_name,
-                    arguments=raw_args,
+                    arguments=cast(dict[str, object], raw_args),
                 )
             )
 
@@ -204,7 +213,20 @@ async def execute_tool(
 
     t0 = time.monotonic()
 
-    if tc.name == "browser" and not browser_allowed:
+    if tc.name == "bash" and _is_crontab_command(str(tc.arguments.get("command", ""))):
+        result = ToolResult(
+            success=False,
+            output="",
+            error=(
+                "禁止通过 bash 操作系统 crontab。"
+                "请使用内置 cron 工具管理定时任务：\n"
+                "- 查看: cron(action=\"list\")\n"
+                "- 添加: cron(action=\"add\", ...)\n"
+                "- 删除: cron(action=\"remove\", job_id=\"...\")\n"
+                "- 一次性提醒: reminder(message=\"...\", minutes=N)"
+            ),
+        )
+    elif tc.name == "browser" and not browser_allowed:
         result = ToolResult(
             success=False,
             output="",
@@ -358,51 +380,6 @@ _USER_FRAME_RE = re.compile(
     re.MULTILINE,
 )
 _NON_TB_TAIL_LINES = 3
-
-
-def _summarize_error(text: str) -> str:
-    """从错误输出中提取摘要：错误类型 + 用户脚本位置 + 非堆栈关键行。"""
-    lines = text.splitlines()
-    if len(lines) <= 5:
-        return text
-
-    parts: list[str] = []
-
-    # 提取 traceback 之前的内容（如 "生图失败: HTTP 422" / API 响应）
-    tb_match = _TRACEBACK_RE.search(text)
-    if tb_match:
-        pre_tb = text[:tb_match.start()].strip()
-        if pre_tb:
-            pre_lines = pre_tb.splitlines()
-            for ln in pre_lines[:3]:
-                ln = ln.strip()
-                if ln and ln != "[stderr]":
-                    parts.append(ln)
-
-    # 提取最终错误行（如 "ModuleNotFoundError: No module named pptx"）
-    final_errors: list[str] = []
-    for m in _FINAL_ERROR_RE.finditer(text):
-        final_errors.append(m.group(1).strip())
-    if final_errors:
-        parts.append(final_errors[-1])
-
-    # 提取用户脚本触发位置（/tmp/ 下的文件，非 site-packages）
-    user_frame = _USER_FRAME_RE.search(text)
-    if user_frame:
-        parts.append(f"触发位置: {user_frame.group(1)} 第{user_frame.group(2)}行")
-
-    # 无 traceback 的长输出：取首尾各几行
-    if not tb_match and not final_errors:
-        head = lines[:2]
-        tail = lines[-_NON_TB_TAIL_LINES:]
-        omitted = len(lines) - len(head) - len(tail)
-        if omitted > 0:
-            return "\n".join(head + [f"  ... (省略 {omitted} 行) ..."] + tail)
-        return text
-
-    if not parts:
-        return text if len(text) <= _ERROR_SUMMARY_MAX_CHARS else text[:_ERROR_SUMMARY_MAX_CHARS]
-    return "\n".join(parts)
 
 
 def format_tool_output(result: ToolResult) -> str:
@@ -607,7 +584,12 @@ def _repair_nano_banana_bash_command(command: str) -> tuple[str, bool]:
     return repaired, repaired != command
 
 
-def repair_tool_call(tc: ToolCall, user_message: str) -> tuple[ToolCall, str | None]:
+def repair_tool_call(
+    tc: ToolCall,
+    user_message: str,
+    *,
+    skill_hooks: list[SkillHooksProtocol] | None = None,
+) -> tuple[ToolCall, str | None]:
     args: dict[str, object] = dict(tc.arguments)
     changed = False
     reasons: list[str] = []
@@ -635,13 +617,27 @@ def repair_tool_call(tc: ToolCall, user_message: str) -> tuple[ToolCall, str | N
         reasons.append(f"{canonical}<-alias")
 
     if tc.name == "bash" and is_non_empty_str(args.get("command")):
-        repaired_command, command_changed = _repair_nano_banana_bash_command(
-            str(args.get("command", ""))
-        )
-        if command_changed:
-            args["command"] = repaired_command
-            changed = True
-            reasons.append("command<-nano-banana-cli")
+        _bash_repaired = False
+        if skill_hooks:
+            cmd_str = str(args.get("command", ""))
+            for _rh in skill_hooks:
+                _result = _rh.repair_tool_call(cmd_str)
+                if _result is not None:
+                    repaired_cmd, cmd_changed = _result
+                    if cmd_changed:
+                        args["command"] = repaired_cmd
+                        changed = True
+                        reasons.append(f"command<-{type(_rh).__name__}")
+                        _bash_repaired = True
+                        break
+        if not _bash_repaired:
+            repaired_command, command_changed = _repair_nano_banana_bash_command(
+                str(args.get("command", ""))
+            )
+            if command_changed:
+                args["command"] = repaired_command
+                changed = True
+                reasons.append("command<-nano-banana-cli")
 
     if tc.name == "browser":
         action = str(args.get("action", "")).strip().lower()

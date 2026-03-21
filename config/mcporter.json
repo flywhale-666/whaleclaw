@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "高德地图": {
+      "baseUrl": "https://mcp.amap.com/mcp?key=1d6aa5a73894869621de130ab812dcdc"
+    }
+  },
+  "imports": []
+}

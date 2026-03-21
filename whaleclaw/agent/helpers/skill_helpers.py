@@ -1,4 +1,4 @@
-"""Skill-lock and assistant-name helpers for the single-agent runtime."""
+"""Skill runtime helpers: lock, guard, params, tool selection, queue."""
 
 from __future__ import annotations
 
@@ -25,7 +25,12 @@ CORE_NATIVE_TOOLS = {
 _NANO_BANANA_DEFAULT_MODEL_FILE = (
     Path.home() / ".whaleclaw" / "credentials" / "nano_banana_default_model.txt"
 )
-MAX_NATIVE_TOOLS = 12
+_NANO_BANANA_BASE_URL_FILE = (
+    Path.home() / ".whaleclaw" / "credentials" / "nano_banana_base_url.txt"
+)
+_NANO_BANANA_DEFAULT_BASE_URL = "https://ai.t8star.cn"
+_NANO_BANANA_BACKUP_BASE_URL = "https://ai.comfly.chat"
+MAX_NATIVE_TOOLS = 16
 TOOL_POLICY_KEYWORDS: dict[tuple[str, ...], tuple[str, ...]] = {
     ("桌面截图", "截图桌面", "截屏", "屏幕截图", "desktop screenshot"): ("desktop_capture",),
     ("ppt", "pptx", "幻灯片", "演示文稿"): ("ppt_edit", "file_edit", "patch_apply"),
@@ -34,6 +39,7 @@ TOOL_POLICY_KEYWORDS: dict[tuple[str, ...], tuple[str, ...]] = {
     ("网页", "网站", "页面", "链接", "url"): ("browser", "web_fetch"),
     ("代码", "脚本", "终端", "命令", "日志"): ("bash", "file_read", "file_write"),
     ("进程", "后台", "卡住", "kill", "日志"): ("process", "bash"),
+    ("定时", "提醒", "闹钟", "计划任务", "cron", "reminder", "定时任务", "提醒我"): ("cron", "reminder"),
 }
 
 
@@ -128,10 +134,23 @@ def build_skill_lock_system_message(skill_ids: list[str]) -> Message:
     )
 
 
+_NANO_BANANA_DISPLAY_TO_API: dict[str, str] = {
+    "香蕉pro": "nano-banana-2",
+    "香蕉2": "gemini-3.1-flash-image-preview",
+}
+_NANO_BANANA_API_MODEL_DEFAULT = "gemini-3.1-flash-image-preview"
+
+
+def nano_banana_display_to_api_model(display_name: str) -> str:
+    """展示名 → API 底层模型名。"""
+    return _NANO_BANANA_DISPLAY_TO_API.get(display_name, _NANO_BANANA_API_MODEL_DEFAULT)
+
+
 def build_nano_banana_execution_system_message(
     current_model: str,
     recent_image_paths: list[str],
 ) -> Message:
+    api_model = nano_banana_display_to_api_model(current_model)
     if recent_image_paths:
         alias_lines: list[str] = []
         for index, path in enumerate(recent_image_paths):
@@ -152,9 +171,9 @@ def build_nano_banana_execution_system_message(
         content=(
             "当前正在执行 nano-banana-image-t8 技能。\n"
             "执行约束：\n"
-            f"1) 当前本轮模型是：{current_model}。若调用脚本，"
-            f"必须把 `--model` 和 `--edit-model` 都设置为 `{current_model}`，"
-            "不要继续沿用其它模型。\n"
+            f"1) 当前本轮模型是：{current_model}（底层模型名 `{api_model}`）。"
+            "若调用脚本，必须把 `--model` 和 `--edit-model` 都设置为 "
+            f"`{api_model}`（不要传展示名，API 只接受底层模型名）。\n"
             "2) 调用脚本时，绝不能把 `.py` 文件直接当 shell 命令执行；"
             "必须显式使用 `./python/bin/python3.12 脚本路径 ...参数...`。\n"
             "3) 对外回复只使用展示名“香蕉2”或“香蕉pro”，"
@@ -294,6 +313,84 @@ def has_param_secret_source(param: SkillParamItem) -> bool:
     return False
 
 
+_API_KEY_PREFIXES = ("sk-", "tvly-")
+
+_API_KEY_RE = re.compile(
+    r"\b((?:" + "|".join(re.escape(p) for p in _API_KEY_PREFIXES) + r")[A-Za-z0-9_-]{8,})\b"
+)
+
+
+def extract_api_key_value(text: str) -> str:
+    """从消息中提取已知前缀的 API key 原始值，未找到返回空字符串。
+
+    支持前缀: sk-、tvly-
+    """
+    match = _API_KEY_RE.search(text)
+    return match.group(1) if match else ""
+
+
+def is_api_key_only_message(text: str) -> bool:
+    """消息是否仅包含一个 API key，没有其他有意义的内容。"""
+    stripped = _IMAGE_NOISE_RE.sub("", text).strip()
+    key = _API_KEY_RE.search(stripped)
+    if not key:
+        return False
+    remainder = stripped[:key.start()] + stripped[key.end():]
+    remainder = re.sub(r"[\s,;，；。.!！?？:：\-_]+", "", remainder)
+    return len(remainder) <= 6
+
+
+def persist_param_api_key(params: list[SkillParamItem], text: str) -> bool:
+    """若消息中包含新 API key 且参数定义了 saved_file，立即写入文件。
+
+    返回是否成功写入。
+    """
+    key_value = extract_api_key_value(text)
+    if not key_value:
+        return False
+    for param in params:
+        if param.type.strip().lower() != "api_key":
+            continue
+        if not param.saved_file:
+            continue
+        path = Path(param.saved_file).expanduser()
+        try:
+            existing = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            existing = ""
+        if existing == key_value:
+            return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(key_value, encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return True
+    return False
+
+
+_GUARD_CONFIRM_RE = re.compile(
+    r"^(?:开始|确认|ok|好的?|可以|没问题|就这样|对的?|行|嗯|发吧|开始吧|go|"
+    r"快速发布|直接发|自动发|不用确认|直接发布|发布|任务完成|解锁|取消)\s*[!！。.]*$",
+    re.IGNORECASE,
+)
+
+_IMAGE_NOISE_RE = re.compile(
+    r"!\[[^\]]*\]\([^)]+\)|[\(（]用户发送了(?:图片|一张图片)[\)）]",
+)
+
+
+def _strip_image_noise(text: str) -> str:
+    """去掉消息中的图片 markdown 和 '(用户发送了图片)' 标记。"""
+    return _IMAGE_NOISE_RE.sub("", text).strip()
+
+
+def _is_guard_confirm_word(text: str) -> bool:
+    """判断消息是否为守卫阶段的确认/控制词，不应被当作参数内容。"""
+    return bool(_GUARD_CONFIRM_RE.search(text.strip()))
+
+
 def capture_param_value(
     param: SkillParamItem,
     text: str,
@@ -305,14 +402,24 @@ def capture_param_value(
     if param_type == "images":
         prev_count = int(previous) if isinstance(previous, int) else 0
         return max(prev_count, len(images or []))
+    if param_type == "base_url":
+        switch_url = detect_nano_banana_base_url_switch(text)
+        if switch_url:
+            return switch_url
+        alias_val = extract_value_by_aliases(text, aliases)
+        if alias_val:
+            cleaned = alias_val.strip().rstrip("/")
+            if cleaned in {_NANO_BANANA_DEFAULT_BASE_URL, _NANO_BANANA_BACKUP_BASE_URL}:
+                return cleaned
+        return previous
     if param_type in {"ratio", "size"}:
         value = extract_ratio_or_size(text) or extract_value_by_aliases(text, aliases)
         return value or previous
     if param_type == "api_key":
-        if re.search(r"\bsk-[A-Za-z0-9_-]{12,}\b", text):
+        if _API_KEY_RE.search(text):
             return "__present__"
         alias_val = extract_value_by_aliases(text, aliases)
-        if alias_val and "sk-" in alias_val.lower():
+        if alias_val and any(p in alias_val.lower() for p in _API_KEY_PREFIXES):
             return "__present__"
         if has_param_secret_source(param):
             return "__present__"
@@ -321,16 +428,28 @@ def capture_param_value(
     if alias_val:
         return alias_val
     if param_type == "text":
-        stripped = text.strip()
-        if (
-            stripped
-            and len(stripped) >= 6
-            and not stripped.startswith("/use ")
-            and "技能" not in stripped
-        ):
-            if any(token in stripped for token in ("api key", "apikey", "尺寸", "比例")):
+        stripped = _strip_image_noise(text).strip()
+        if stripped and not stripped.startswith("/use "):
+            if _is_guard_confirm_word(stripped):
                 return previous
-            return stripped
+            cleaned = re.sub(
+                r"^(?:使用|调用|启动|启用|走|用).{0,20}(?:技能|skill)\s*",
+                "",
+                stripped,
+                flags=re.IGNORECASE,
+            ).strip()
+            candidate = cleaned or stripped
+            if (
+                candidate
+                and len(candidate) >= 4
+                and "技能" not in candidate
+            ):
+                candidate_lower = candidate.lower()
+                if any(token in candidate_lower for token in ("api key", "apikey", "尺寸", "比例")):
+                    return previous
+                if re.search(r"\bsk-[A-Za-z0-9_-]{12,}\b", candidate):
+                    return previous
+                return candidate
     return previous
 
 
@@ -401,6 +520,14 @@ _NANO_BANANA_CONTROL_MESSAGE_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"^(?:用|改用|切换到)?\s*(?:香蕉2|香蕉pro)\s*(?:重试|再试一次|继续|继续跑)?\s*$",
         re.IGNORECASE,
     ),
+    re.compile(
+        r"^(?:切换|换成|改用|使用)?\s*(?:默认|备用)\s*(?:基地址|api地址|api基地址|base\s*url)\s*$",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"^(?:默认|备用)\s*(?:基地址|api地址|api基地址|base\s*url)\s*$",
+        re.IGNORECASE,
+    ),
 )
 
 _NANO_BANANA_ACTIVATION_MESSAGE_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -429,72 +556,61 @@ def is_nano_banana_activation_message(text: str) -> bool:
     return any(pattern.fullmatch(stripped) for pattern in _NANO_BANANA_ACTIVATION_MESSAGE_PATTERNS)
 
 
+_BASE_URL_SWITCH_DEFAULT_RE = re.compile(
+    r"(?:切换|换成|改用|使用)?\s*默认\s*(?:基地址|api地址|api基地址|base\s*url)",
+    re.IGNORECASE,
+)
+_BASE_URL_SWITCH_BACKUP_RE = re.compile(
+    r"(?:切换|换成|改用|使用)?\s*备用\s*(?:基地址|api地址|api基地址|base\s*url)",
+    re.IGNORECASE,
+)
+
+
+def detect_nano_banana_base_url_switch(text: str) -> str | None:
+    """检测用户是否要切换基地址。返回目标 URL 或 None。"""
+    stripped = text.strip()
+    if not stripped:
+        return None
+    if _BASE_URL_SWITCH_BACKUP_RE.search(stripped):
+        return _NANO_BANANA_BACKUP_BASE_URL
+    if _BASE_URL_SWITCH_DEFAULT_RE.search(stripped):
+        return _NANO_BANANA_DEFAULT_BASE_URL
+    return None
+
+
 def load_saved_nano_banana_model_display() -> str:
     """Load persisted Nano Banana default model display name."""
     try:
         raw = _NANO_BANANA_DEFAULT_MODEL_FILE.read_text(encoding="utf-8").strip().lower()
     except OSError:
         return "香蕉2"
-    if raw == "nano-banana-2":
+    if raw in ("nano-banana-2", "香蕉pro", "banana pro"):
         return "香蕉pro"
     return "香蕉2"
 
 
-def _build_nano_banana_param_guard_reply(state: dict[str, object]) -> str:
-    """Render the dedicated parameter guard copy for Nano Banana."""
-    current_model = str(
-        state.get("__model_display__", load_saved_nano_banana_model_display())
-    ).strip() or "香蕉2"
-    if current_model == "香蕉pro":
-        model_line = "2) 当前模型：香蕉pro（0.2元）可切换模型香蕉2（0.1元）"
-    else:
-        model_line = "2) 当前模型：香蕉2（0.1元）可切换模型香蕉pro（0.2元）"
+def load_saved_nano_banana_base_url() -> str:
+    """Load persisted Nano Banana API base URL."""
+    try:
+        raw = _NANO_BANANA_BASE_URL_FILE.read_text(encoding="utf-8").strip().rstrip("/")
+    except OSError:
+        return _NANO_BANANA_DEFAULT_BASE_URL
+    if raw in {_NANO_BANANA_DEFAULT_BASE_URL, _NANO_BANANA_BACKUP_BASE_URL}:
+        return raw
+    return _NANO_BANANA_DEFAULT_BASE_URL
 
-    prompt_status = "3) 提示词：已收到" if param_satisfied(
-        SkillParamItem(key="prompt", type="text"),
-        state.get("prompt"),
-    ) else "3) 提示词：未提供"
-    image_status = format_param_status(
-        SkillParamItem(
-            key="images",
-            label="图生图图片",
-            type="images",
-            required=False,
-            min_count=1,
-        ),
-        state.get("images"),
-    )
-    lines = [
-        "我将使用 nano-banana-image-t8 技能继续完成任务。",
-        "",
-        "我先确认参数（缺啥补啥）：",
-        (
-            "1) API Key：已就绪"
-            if param_satisfied(
-                SkillParamItem(key="api_key", type="api_key"),
-                state.get("api_key"),
-            )
-            else "1) API Key：未提供"
-        ),
-        model_line,
-        prompt_status,
-        f"4) {image_status}",
-        "5) 切换本次模型：切换香蕉2（pro）。设置默认模型：默认模型香蕉2（pro）",
-    ]
-    missing_prompts: list[str] = []
-    if not param_satisfied(SkillParamItem(key="api_key", type="api_key"), state.get("api_key")):
-        missing_prompts.append("请提供 Nano Banana API Key")
-    if not param_satisfied(SkillParamItem(key="prompt", type="text"), state.get("prompt")):
-        missing_prompts.append("请提供提示词")
-    raw_images = state.get("images", 0)
-    image_count = int(raw_images) if isinstance(raw_images, int) else 0
-    if image_count < 1:
-        missing_prompts.append("请上传图片")
-    if missing_prompts:
-        lines.append("请补充：" + "；".join(missing_prompts) + "。")
-    else:
-        lines.append("参数已齐，我现在开始执行。")
-    return "\n".join(lines)
+
+def save_nano_banana_base_url(url: str) -> None:
+    """Persist Nano Banana API base URL to credentials file."""
+    cleaned = url.strip().rstrip("/")
+    if cleaned not in {_NANO_BANANA_DEFAULT_BASE_URL, _NANO_BANANA_BACKUP_BASE_URL}:
+        return
+    _NANO_BANANA_BASE_URL_FILE.parent.mkdir(parents=True, exist_ok=True)
+    _NANO_BANANA_BASE_URL_FILE.write_text(cleaned, encoding="utf-8")
+    try:
+        os.chmod(_NANO_BANANA_BASE_URL_FILE, 0o600)
+    except OSError:
+        pass
 
 
 def nano_banana_missing_required(
@@ -516,9 +632,15 @@ def build_skill_param_guard_reply(
     skill_id: str,
     params: list[SkillParamItem],
     state: dict[str, object],
+    *,
+    hooks: object | None = None,
 ) -> str:
-    if skill_id == "nano-banana-image-t8":
-        return _build_nano_banana_param_guard_reply(state)
+    if hooks is not None:
+        from whaleclaw.skills.hooks import SkillHooks
+        if isinstance(hooks, SkillHooks):
+            custom = hooks.build_param_guard_reply(state)
+            if custom is not None:
+                return custom
 
     lines = [f"我将使用 {skill_id} 技能继续完成任务。", "", "我先确认参数（缺啥补啥）："]
     missing_prompts: list[str] = []
@@ -771,13 +893,19 @@ __all__ = [
     "build_skill_queue_status_message",
     "build_skill_param_guard_reply",
     "capture_param_value",
+    "detect_nano_banana_base_url_switch",
     "detect_nano_banana_model_display",
+    "load_saved_nano_banana_base_url",
+    "save_nano_banana_base_url",
     "detect_assistant_name_update",
     "extract_ratio_or_size",
     "extract_value_by_aliases",
     "format_param_status",
     "guarded_skills",
+    "extract_api_key_value",
     "has_param_secret_source",
+    "is_api_key_only_message",
+    "persist_param_api_key",
     "is_nano_banana_activation_message",
     "is_nano_banana_control_message",
     "is_skill_switch_consent",

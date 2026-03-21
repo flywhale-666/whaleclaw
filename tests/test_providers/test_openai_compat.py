@@ -10,7 +10,7 @@ from unittest.mock import patch
 import httpx
 import pytest
 
-from whaleclaw.providers.base import Message, ToolCall
+from whaleclaw.providers.base import ImageContent, Message, ToolCall
 from whaleclaw.providers.openai import OpenAIProvider
 from whaleclaw.providers.qwen import QwenProvider
 from whaleclaw.types import ProviderAuthError, ProviderError
@@ -173,6 +173,53 @@ def test_qwen_build_body_enables_stream_usage() -> None:
     )
     assert body["stream"] is True
     assert body["stream_options"] == {"include_usage": True}
+
+
+def test_openai_compat_build_body_includes_user_images_as_data_urls() -> None:
+    provider = OpenAIProvider(api_key="test-key")
+    body = provider._build_body(
+        [
+            Message(
+                role="user",
+                content="描述这张图",
+                images=[ImageContent(mime="image/jpeg", data="ZmFrZS1pbWFnZQ==")],
+            )
+        ],
+        "gpt-4o",
+        None,
+    )
+
+    user_msg = body["messages"][0]
+    assert user_msg["role"] == "user"
+    assert user_msg["content"][0] == {
+        "type": "image_url",
+        "image_url": {"url": "data:image/jpeg;base64,ZmFrZS1pbWFnZQ=="},
+    }
+    assert user_msg["content"][1] == {"type": "text", "text": "描述这张图"}
+
+
+def test_openai_responses_body_includes_user_images_as_input_images() -> None:
+    provider = OpenAIProvider(api_key="test-key")
+    body = provider._build_responses_body(
+        [
+            Message(
+                role="user",
+                content="描述这张图",
+                images=[ImageContent(mime="image/png", data="cG5nLWJ5dGVz")],
+            )
+        ],
+        "gpt-5.4",
+        None,
+    )
+
+    user_msg = body["input"][0]
+    assert user_msg["role"] == "user"
+    assert user_msg["type"] == "message"
+    assert user_msg["content"][0] == {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,cG5nLWJ5dGVz",
+    }
+    assert user_msg["content"][1] == {"type": "input_text", "text": "描述这张图"}
 
 
 @pytest.mark.asyncio

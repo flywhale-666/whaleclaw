@@ -9,6 +9,7 @@ from whaleclaw.gateway.protocol import (
     make_message,
     make_pong,
     make_stream,
+    make_tool_result,
 )
 
 
@@ -51,3 +52,10 @@ class TestHelpers:
     def test_make_pong(self) -> None:
         msg = make_pong()
         assert msg.type == MessageType.PONG
+
+    def test_make_tool_result_includes_error(self) -> None:
+        msg = make_tool_result("sid-1", "ppt_edit", "", False, "删除失败")
+        assert msg.type == MessageType.TOOL_RESULT
+        assert msg.payload["name"] == "ppt_edit"
+        assert msg.payload["success"] is False
+        assert msg.payload["error"] == "删除失败"

@@ -5,15 +5,14 @@ from __future__ import annotations
 import base64
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from whaleclaw.channels.feishu.allowlist import FeishuAllowList
 from whaleclaw.channels.feishu.card import FeishuCard
-from whaleclaw.channels.feishu.client import FeishuClient
 from whaleclaw.channels.feishu.config import FeishuConfig
 from whaleclaw.channels.feishu.dedup import MessageDedup
 from whaleclaw.channels.feishu.mention import is_bot_mentioned, strip_bot_mention
@@ -85,6 +84,17 @@ log = get_logger(__name__)
 _FEISHU_MEDIA_DIR = WHALECLAW_HOME / "media" / "feishu"
 _PENDING_IMAGE_PATHS_KEY = "feishu_pending_image_paths"
 _PENDING_PROMPT_KEY = "feishu_pending_prompt"
+_PROCESSING_REACTION_EMOJIS = ("THINKING", "HOURGLASS")
+def _image_buffer_skill_ids() -> frozenset[str]:
+    """从已加载技能的 hooks 动态获取需要图片缓冲的技能 ID。"""
+    from whaleclaw.skills.hooks import get_skill_hooks
+    from whaleclaw.skills.manager import SkillManager
+    ids: set[str] = set()
+    for skill in SkillManager().discover():
+        hooks = get_skill_hooks(skill)
+        if hooks is not None and hooks.image_buffer_enabled:
+            ids.add(skill.id)
+    return frozenset(ids)
 
 
 @dataclass(slots=True)
@@ -101,12 +111,126 @@ def _format_exception_text(exc: Exception) -> str:
     return msg if msg else exc.__class__.__name__
 
 
+def format_exception_text(exc: Exception) -> str:
+    """Public wrapper for exception text formatting."""
+    return _format_exception_text(exc)
+
+
+def processing_reaction_emojis() -> tuple[str, ...]:
+    """Public accessor for reaction fallback order."""
+    return _PROCESSING_REACTION_EMOJIS
+
+
+def _to_object_dict(value: object) -> dict[str, object] | None:
+    """Normalize loose JSON/mapping payloads into a string-keyed dict."""
+    if not isinstance(value, dict):
+        return None
+    raw_dict = cast(dict[object, object], value)
+    return {str(key): item for key, item in raw_dict.items()}
+
+
+def _parse_json_object(content_str: object) -> dict[str, object] | None:
+    """Parse a JSON string and return a normalized object dict."""
+    if not isinstance(content_str, str):
+        return None
+    try:
+        parsed = json.loads(content_str)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    return _to_object_dict(parsed)
+
+
+def _iter_post_elements(content: Mapping[str, object]) -> list[dict[str, object]]:
+    """Flatten Feishu post blocks into a list of normalized element dicts."""
+    raw_blocks = content.get("content")
+    if not isinstance(raw_blocks, list):
+        return []
+    elements: list[dict[str, object]] = []
+    for raw_line in cast(list[object], raw_blocks):
+        if not isinstance(raw_line, list):
+            continue
+        for raw_elem in cast(list[object], raw_line):
+            elem = _to_object_dict(raw_elem)
+            if elem is not None:
+                elements.append(elem)
+    return elements
+
+
+def _copy_metadata(value: object) -> dict[str, Any]:
+    """Create a typed metadata copy safe for session updates."""
+    if not isinstance(value, dict):
+        return {}
+    raw_dict = cast(dict[object, Any], value)
+    return {str(key): item for key, item in raw_dict.items()}
+
+
+def _string_list(value: object) -> list[str]:
+    """Coerce a JSON-ish list into a filtered string list."""
+    if not isinstance(value, list):
+        return []
+    result: list[str] = []
+    for item in cast(list[object], value):
+        text = str(item).strip()
+        if text:
+            result.append(text)
+    return result
+
+
+def _int_or_none(value: object) -> int | None:
+    """Parse an integer from loose JSON values."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.isdigit():
+            return int(stripped)
+    return None
+
+
+class _FeishuClientLike(Protocol):
+    """Minimal client protocol used by the bot and tests."""
+
+    async def reply_message(
+        self, message_id: str, msg_type: str, content: str
+    ) -> dict[str, Any]: ...
+
+    async def create_message_reaction(
+        self,
+        message_id: str,
+        emoji_type: str,
+    ) -> dict[str, Any]: ...
+
+    async def delete_message_reaction(
+        self,
+        message_id: str,
+        reaction_id: str,
+    ) -> dict[str, Any]: ...
+
+    async def download_resource(
+        self, message_id: str, file_key: str, *, resource_type: str = "file"
+    ) -> bytes: ...
+
+    async def upload_image(self, image: bytes, image_type: str = "message") -> str: ...
+
+    async def upload_file(self, file: bytes, filename: str, file_type: str) -> str: ...
+
+    async def send_message(
+        self,
+        receive_id: str,
+        msg_type: str,
+        content: str,
+        receive_id_type: str = "open_id",
+    ) -> dict[str, Any]: ...
+
+
 class FeishuBot:
     """Process incoming Feishu messages and route to the Agent."""
 
     def __init__(
         self,
-        client: FeishuClient,
+        client: _FeishuClientLike,
         config: FeishuConfig,
         allowlist: FeishuAllowList | None = None,
     ) -> None:
@@ -250,28 +374,35 @@ class FeishuBot:
                 text = run_text
                 images = run_images
 
-        await self._client.reply_message(
-            msg_id, "text", json.dumps({"text": "收到，处理中..."}, ensure_ascii=False)
-        )
-        await self._run_agent_and_reply(text, open_id, msg_id, images=images)
+        reaction_state = await self._add_processing_reaction(msg_id)
+        try:
+            await self._run_agent_and_reply(text, open_id, msg_id, images=images)
+        finally:
+            await self._remove_processing_reaction(msg_id, reaction_state)
 
     async def _handle_pending_image_submission(
         self,
         session: Any,
         *,
         raw_text: str,
-        inbound_images: list[_InboundImage],
+        inbound_images: Sequence[_InboundImage],
     ) -> tuple[str | None, str | None, list[ImageContent] | None] | None:
-        """Buffer Feishu images until the user explicitly submits the request."""
+        """Buffer Feishu images until the user explicitly submits the request.
+
+        Only activates when the session has a skill that requires image
+        buffering (e.g. xiaohongshu_publish) or there are already buffered
+        images from a previous turn.
+        """
         if self._session_manager is None:
             return None
 
-        metadata = dict(session.metadata) if isinstance(session.metadata, dict) else {}
-        pending_paths = [
-            str(item).strip()
-            for item in metadata.get(_PENDING_IMAGE_PATHS_KEY, [])
-            if str(item).strip()
-        ]
+        metadata = _copy_metadata(session.metadata)
+        pending_paths = _string_list(metadata.get(_PENDING_IMAGE_PATHS_KEY))
+
+        if not pending_paths:
+            locked = _string_list(metadata.get("locked_skill_ids"))
+            if not _image_buffer_skill_ids().intersection(s.lower() for s in locked):
+                return None
         pending_prompt = str(metadata.get(_PENDING_PROMPT_KEY, "")).strip()
         stripped_text, submitted = self._strip_submit_suffix(raw_text)
 
@@ -293,15 +424,20 @@ class FeishuBot:
             metadata[_PENDING_IMAGE_PATHS_KEY] = pending_paths
             metadata.pop(_PENDING_PROMPT_KEY, None)
             await self._session_manager.update_metadata(session, metadata)
-            start = len(pending_paths) - len(inbound_images) + 1
-            labels = self._format_image_range(start, len(pending_paths))
-            return (
-                f"已收到{labels}。继续上传图片，或发送提示词开始执行。",
-                None,
-                None,
-            )
+            already = self._count_skill_images(metadata)
+            start = already + len(pending_paths) - len(inbound_images) + 1
+            labels = self._format_image_range(start, already + len(pending_paths))
+            locked = _string_list(metadata.get("locked_skill_ids"))
+            hint = self._build_image_buffer_hint(locked, labels)
+            return (hint, None, None)
 
         if pending_paths and stripped_text and not submitted:
+            # "任务完成"等解锁指令不要合并 pending 图片，直接透传给 agent
+            if self._is_unlock_command(stripped_text):
+                metadata.pop(_PENDING_IMAGE_PATHS_KEY, None)
+                metadata.pop(_PENDING_PROMPT_KEY, None)
+                await self._session_manager.update_metadata(session, metadata)
+                return None
             buffered = self._load_buffered_images(pending_paths)
             metadata.pop(_PENDING_IMAGE_PATHS_KEY, None)
             metadata.pop(_PENDING_PROMPT_KEY, None)
@@ -327,6 +463,16 @@ class FeishuBot:
 
         return None
 
+    _UNLOCK_RE = re.compile(
+        r"^\s*(?:任务完成|完成任务|任务结束|结束任务|完成了?|结束了?|可以了?|取消|解锁)\s*[!！。.]*$",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_unlock_command(cls, text: str) -> bool:
+        """判断文字是否是技能解锁指令，不应与 pending 图片合并。"""
+        return bool(cls._UNLOCK_RE.search(text.strip()))
+
     @staticmethod
     def _strip_submit_suffix(text: str) -> tuple[str, bool]:
         stripped = text.strip()
@@ -343,26 +489,91 @@ class FeishuBot:
         for raw_path in image_paths:
             path = Path(raw_path).expanduser()
             if not path.is_file():
+                log.warning(
+                    "feishu.buffered_image_missing",
+                    path=raw_path,
+                    resolved=str(path),
+                )
                 continue
             try:
                 data = path.read_bytes()
             except OSError:
+                log.warning("feishu.buffered_image_read_failed", path=str(path))
                 continue
             mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
             loaded.append(_InboundImage(
-                content=ImageContent(
+                ImageContent(
                     mime=mime,
                     data=base64.b64encode(data).decode("ascii"),
                 ),
-                path=str(path),
+                str(path),
             ))
+        log.info(
+            "feishu.buffered_images_loaded",
+            requested=len(image_paths),
+            loaded=len(loaded),
+            paths=image_paths,
+        )
         return loaded
+
+    @staticmethod
+    def _count_skill_images(metadata: dict[str, Any]) -> int:
+        """统计 skill_param_state 中已确认的图片数（不含当前 pending buffer）。"""
+        sps: object = metadata.get("skill_param_state")
+        if not isinstance(sps, dict):
+            return 0
+        typed_sps = cast(dict[str, object], sps)
+        for state_val in typed_sps.values():
+            if not isinstance(state_val, dict):
+                continue
+            typed_state = cast(dict[str, object], state_val)
+            raw_img: object = typed_state.get("images")
+            if isinstance(raw_img, int) and raw_img > 0:
+                return raw_img
+        return 0
 
     @staticmethod
     def _format_image_range(start: int, end: int) -> str:
         if end <= start:
             return f"图{start}"
         return f"图{start}到图{end}"
+
+    async def _add_processing_reaction(self, message_id: str) -> tuple[str, str] | None:
+        """Add a lightweight processing reaction to the user message."""
+        for emoji_type in _PROCESSING_REACTION_EMOJIS:
+            try:
+                resp = await self._client.create_message_reaction(message_id, emoji_type)
+                reaction_id = str(resp.get("data", {}).get("reaction_id", "")).strip()
+                if reaction_id:
+                    return (reaction_id, emoji_type)
+            except Exception as exc:
+                log.debug(
+                    "feishu.reaction_create_failed",
+                    message_id=message_id,
+                    emoji_type=emoji_type,
+                    error=_format_exception_text(exc),
+                )
+        return None
+
+    async def _remove_processing_reaction(
+        self,
+        message_id: str,
+        reaction_state: tuple[str, str] | None,
+    ) -> None:
+        """Remove the temporary processing reaction after final reply."""
+        if not reaction_state:
+            return
+        reaction_id, emoji_type = reaction_state
+        try:
+            await self._client.delete_message_reaction(message_id, reaction_id)
+        except Exception as exc:
+            log.debug(
+                "feishu.reaction_delete_failed",
+                message_id=message_id,
+                reaction_id=reaction_id,
+                emoji_type=emoji_type,
+                error=_format_exception_text(exc),
+            )
 
     async def _run_agent_and_reply(
         self,
@@ -436,7 +647,7 @@ class FeishuBot:
                 registry=self._tool_registry,
                 images=images or None,
                 session_manager=self._session_manager,
-                session_store=self._session_manager._store,  # noqa: SLF001
+                session_store=self._session_manager.store,
                 memory_manager=self._memory_manager,
                 extra_memory=extra_memory,
                 trigger_event_id=reply_to_msg_id,
@@ -555,6 +766,8 @@ class FeishuBot:
             if target not in models:
                 return f"模型不可用: {target}\n发送 /models 查看可选模型。"
 
+            if self._session_manager is None:
+                return "模型切换不可用：会话管理器未初始化。"
             await self._session_manager.update_model(session, target)
             if self._whaleclaw_config is not None:
                 self._whaleclaw_config.agent.model = target
@@ -580,7 +793,7 @@ class FeishuBot:
             if action in {"status", "st", "s"}:
                 return self._format_multi_agent_status(session)
 
-            metadata = dict(session.metadata) if isinstance(session.metadata, dict) else {}
+            metadata = _copy_metadata(session.metadata)
 
             if action in {"on", "enable"}:
                 metadata["multi_agent_enabled"] = True
@@ -632,39 +845,38 @@ class FeishuBot:
         global_enabled = False
         global_mode = "parallel"
         global_rounds = 1
-        if self._whaleclaw_config is not None and isinstance(self._whaleclaw_config.plugins, dict):
+        if self._whaleclaw_config is not None:
             raw = self._whaleclaw_config.plugins.get("multi_agent", {})
-            if isinstance(raw, dict):
-                global_enabled = bool(raw.get("enabled", False))
-                mode_raw = str(raw.get("mode", "parallel")).strip().lower()
-                global_mode = mode_raw if mode_raw in {"parallel", "serial"} else "parallel"
-                try:
-                    global_rounds = int(raw.get("max_rounds", 1))
-                except Exception:
-                    global_rounds = 1
+            global_enabled = bool(raw.get("enabled", False))
+            mode_raw = str(raw.get("mode", "parallel")).strip().lower()
+            global_mode = mode_raw if mode_raw in {"parallel", "serial"} else "parallel"
+            global_rounds = _int_or_none(raw.get("max_rounds")) or 1
         global_rounds = max(1, min(global_rounds, 10))
 
-        metadata = session.metadata if isinstance(session.metadata, dict) else {}
-        has_enabled_override = isinstance(metadata.get("multi_agent_enabled"), bool)
-        has_mode_override = str(metadata.get("multi_agent_mode", "")).strip().lower() in {
+        metadata = _copy_metadata(session.metadata)
+        enabled_override = metadata.get("multi_agent_enabled")
+        mode_override = str(metadata.get("multi_agent_mode", "")).strip().lower()
+        rounds_override = _int_or_none(metadata.get("multi_agent_max_rounds"))
+        has_enabled_override = isinstance(enabled_override, bool)
+        has_mode_override = mode_override in {
             "parallel",
             "serial",
         }
-        has_rounds_override = isinstance(metadata.get("multi_agent_max_rounds"), int)
+        has_rounds_override = rounds_override is not None
 
         effective_enabled = (
-            bool(metadata.get("multi_agent_enabled"))
+            enabled_override
             if has_enabled_override
             else global_enabled
         )
         effective_mode = (
-            str(metadata.get("multi_agent_mode")).strip().lower()
+            mode_override
             if has_mode_override
             else global_mode
         )
         effective_rounds = global_rounds
         if has_rounds_override:
-            effective_rounds = int(metadata["multi_agent_max_rounds"])
+            effective_rounds = rounds_override
         effective_rounds = max(1, min(effective_rounds, 10))
 
         mode_cn = "并行" if effective_mode == "parallel" else "串行"
@@ -766,7 +978,14 @@ class FeishuBot:
             clean_text = clean_text.replace(match.group(0), "")
         for md_str, label in file_replacements:
             clean_text = clean_text.replace(md_str, label)
+        clean_text = clean_text.replace("\r\n", "\n").replace("\r", "\n")
+        clean_text = re.sub(r"(?m)^\s*\d+\.\s*$\n?", "", clean_text)
+        clean_text = re.sub(r"\n\s*\n+", "\n", clean_text)
         return clean_text.strip(), image_paths, file_paths
+
+    def prepare_reply_payload(self, reply: str) -> tuple[str, list[Path], list[Path]]:
+        """Public wrapper for reply payload extraction."""
+        return self._prepare_reply_payload(reply)
 
     async def _send_image_to_peer(self, peer_id: str, image_path: Path) -> None:
         """Upload a local image to Feishu and send as image message."""
@@ -805,25 +1024,24 @@ class FeishuBot:
     def extract_text(message: dict[str, Any]) -> str:
         """Extract plain text from a Feishu message."""
         msg_type = message.get("message_type", "text")
-        content_str = message.get("content", "{}")
-        try:
-            content = json.loads(content_str)
-        except (json.JSONDecodeError, TypeError):
+        content = _parse_json_object(message.get("content", "{}"))
+        if content is None:
             return ""
 
         if msg_type == "text":
-            return content.get("text", "")
+            text = content.get("text", "")
+            return text if isinstance(text, str) else ""
         if msg_type == "post":
             parts: list[str] = []
-            blocks = content.get("content") or [[]]
-            for line in blocks:
-                for elem in line:
-                    if elem.get("tag") == "text":
-                        parts.append(elem.get("text", ""))
+            for elem in _iter_post_elements(content):
+                if elem.get("tag") == "text":
+                    text = elem.get("text")
+                    if isinstance(text, str):
+                        parts.append(text)
             return " ".join(parts)
         return ""
 
-    async def _extract_images(self, message: dict[str, Any]) -> list[ImageContent]:
+    async def _extract_images(self, message: dict[str, Any]) -> list[_InboundImage]:
         """Download incoming Feishu image(s) and convert to ImageContent.
 
         Supports both pure image messages (msg_type=image) and rich-text
@@ -831,28 +1049,25 @@ class FeishuBot:
         """
         msg_id = message.get("message_id", "")
         msg_type = message.get("message_type", "")
-        content_str = message.get("content", "{}")
-        try:
-            content = json.loads(content_str)
-        except (json.JSONDecodeError, TypeError):
+        content = _parse_json_object(message.get("content", "{}"))
+        if content is None:
             return []
 
         image_keys: list[str] = []
         if msg_type == "image":
-            key = content.get("image_key", "")
-            if key:
+            key = content.get("image_key")
+            if isinstance(key, str) and key:
                 image_keys.append(key)
         elif msg_type == "post":
-            blocks = content.get("content") or [[]]
-            for line in blocks:
-                for elem in line:
-                    if elem.get("tag") == "img" and elem.get("image_key"):
-                        image_keys.append(elem["image_key"])
+            for elem in _iter_post_elements(content):
+                image_key = elem.get("image_key")
+                if elem.get("tag") == "img" and isinstance(image_key, str) and image_key:
+                    image_keys.append(image_key)
             raw_keys = content.get("image_keys")
             if isinstance(raw_keys, list):
-                for k in raw_keys:
-                    if isinstance(k, str) and k and k not in image_keys:
-                        image_keys.append(k)
+                for raw_key in cast(list[object], raw_keys):
+                    if isinstance(raw_key, str) and raw_key and raw_key not in image_keys:
+                        image_keys.append(raw_key)
 
         if not image_keys:
             return []
@@ -884,16 +1099,32 @@ class FeishuBot:
                     mime=mime,
                 )
                 results.append(_InboundImage(
-                    content=ImageContent(
+                    ImageContent(
                         mime=mime,
                         data=base64.b64encode(resized.data).decode("ascii"),
                     ),
-                    path=image_path,
+                    image_path,
                 ))
         return results
 
     @staticmethod
-    def _build_image_markdown(images: list[_InboundImage]) -> str:
+    def _build_image_buffer_hint(locked: list[str], labels: str) -> str:
+        """通过 hooks 获取图片缓冲提示语，无匹配则返回默认提示。"""
+        from whaleclaw.skills.hooks import get_skill_hooks
+        from whaleclaw.skills.manager import SkillManager
+        locked_lower = {s.lower() for s in locked}
+        for skill in SkillManager().discover():
+            if skill.id.lower() not in locked_lower:
+                continue
+            hooks = get_skill_hooks(skill)
+            if hooks is not None and hooks.image_buffer_enabled:
+                custom = hooks.image_buffer_hint(labels)
+                if custom is not None:
+                    return custom
+        return f"已收到{labels}。继续上传图片，或发送提示词开始执行。"
+
+    @staticmethod
+    def _build_image_markdown(images: Sequence[_InboundImage]) -> str:
         """Render local image paths into markdown for WebChat/history replay."""
         if not images:
             return ""
@@ -932,10 +1163,8 @@ class FeishuBot:
     async def _extract_file(self, message: dict[str, Any]) -> str | None:
         """Download incoming Feishu file message and return local absolute path."""
         msg_id = message.get("message_id", "")
-        content_str = message.get("content", "{}")
-        try:
-            content = json.loads(content_str)
-        except (json.JSONDecodeError, TypeError):
+        content = _parse_json_object(message.get("content", "{}"))
+        if content is None:
             return None
 
         file_key = str(content.get("file_key", "")).strip()
