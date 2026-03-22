@@ -352,9 +352,10 @@ async def test_build_window_messages_reschedules_existing_pending_jobs(tmp_path:
 
 
 @pytest.mark.asyncio
-async def test_recent_over_budget_keeps_latest_two_raw_and_downgrades_3_to_5_to_l0(
+async def test_recent_groups_always_l2_even_when_over_budget(
     tmp_path: Path,
 ) -> None:
+    """最近 5 组始终保持 L2，不因 token 超预算而降级。"""
     store = await _mk_store(tmp_path)
     try:
         compressor = SessionGroupCompressor(store)
@@ -367,7 +368,7 @@ async def test_recent_over_budget_keeps_latest_two_raw_and_downgrades_3_to_5_to_
             _mk_group(6, "最近第1组 " + ("超长内容 " * 600)),
         ]
         plan = compressor._window_plan(_flatten(groups))  # pyright: ignore[reportPrivateUsage]
-        assert [x.level for x in plan][-5:] == ["L0", "L0", "L0", "L2", "L2"]
+        assert [x.level for x in plan][-5:] == ["L2", "L2", "L2", "L2", "L2"]
     finally:
         await store.close()
 

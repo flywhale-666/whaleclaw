@@ -529,17 +529,11 @@ class SessionGroupCompressor:
         total_groups = len(all_groups)
         groups = all_groups[-MAX_WINDOW_GROUPS:]
         start_idx = total_groups - len(groups) + 1
-        recent_groups = all_groups[-RECENT_L2_GROUPS:]
-        recent_over_budget = sum(_group_tokens(g) for g in recent_groups) > CONTENT_BUDGET
         items: list[_WindowItem] = []
         for offset, group in enumerate(groups):
             group_idx = start_idx + offset
             from_tail = total_groups - group_idx + 1
-            if recent_over_budget and from_tail in {1, 2}:
-                level = "L2"
-            elif recent_over_budget and from_tail in {3, 4, 5}:
-                level = "L0"
-            elif from_tail <= RECENT_L2_GROUPS:
+            if from_tail <= RECENT_L2_GROUPS:
                 level = "L2"
             elif from_tail <= RECENT_L2_GROUPS + L1_GROUPS:
                 level = "L1"
