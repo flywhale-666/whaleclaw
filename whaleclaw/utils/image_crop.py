@@ -110,7 +110,7 @@ def smart_crop_box(
 
     * Horizontal: always center-crop.
     * Vertical: uses face-aware anchoring with head protection to avoid
-      cutting off heads. Falls back to upper-third crop if no face detected.
+      cutting off heads. Falls back to center-crop if no face detected.
     """
     box_ratio = box_w / box_h
     img_ratio = iw / ih
@@ -138,7 +138,7 @@ def smart_crop_box(
         y0 = anchor_y - new_h * 2 // 3
         y0 = max(0, min(y0, ih - new_h))
     else:
-        y0 = (ih - new_h) // 3
+        y0 = (ih - new_h) // 2
         y0 = max(0, min(y0, ih - new_h))
 
     return (0, y0, iw, y0 + new_h)

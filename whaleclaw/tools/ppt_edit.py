@@ -21,6 +21,9 @@ def _add_cropped_picture(
 ) -> Any:
     """Add a picture to *slide* with smart face-aware cropping.
 
+    Uses crop_* properties to fill the target area without distortion.
+    Never sets pic.width/pic.height after cropping to avoid stretching.
+
     Returns the created picture shape, or None if fallback (no PIL) was used.
     """
     try:
@@ -32,13 +35,6 @@ def _add_cropped_picture(
             iw, ih = im.size
 
         fi = detect_face_info(str(img_path))
-        crop_box = smart_crop_box(iw, ih, iw, int(iw * target_h / target_w), face_info=fi)
-        cx0, cy0, cx1, cy1 = crop_box
-
-        crop_left_frac = cx0 / iw
-        crop_right_frac = 1.0 - cx1 / iw
-        crop_top_frac = cy0 / ih
-        crop_bottom_frac = 1.0 - cy1 / ih
 
         img_ratio = iw / ih
         box_ratio = target_w / target_h
@@ -51,19 +47,20 @@ def _add_cropped_picture(
 
         pic = slide.shapes.add_picture(
             str(img_path),
-            int(left - (scale_w - target_w) / 2),
-            int(top - (scale_h - target_h) / 2),
+            int(left),
+            int(top),
             int(scale_w),
             int(scale_h),
         )
-        pic.crop_left = crop_left_frac
-        pic.crop_right = crop_right_frac
-        pic.crop_top = crop_top_frac
-        pic.crop_bottom = crop_bottom_frac
-        pic.left = int(left)
-        pic.top = int(top)
-        pic.width = int(target_w)
-        pic.height = int(target_h)
+
+        crop_box = smart_crop_box(iw, ih, target_w, target_h, face_info=fi)
+        cx0, cy0, cx1, cy1 = crop_box
+
+        pic.crop_left = cx0 / iw
+        pic.crop_right = 1.0 - cx1 / iw
+        pic.crop_top = cy0 / ih
+        pic.crop_bottom = 1.0 - cy1 / ih
+
         return pic
     except ImportError:
         slide.shapes.add_picture(str(img_path), left, top, width=target_w)

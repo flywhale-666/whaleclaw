@@ -158,9 +158,16 @@ class PromptAssembler:
     @staticmethod
     def _build_awareness(model_id: str, max_context_tokens: int) -> str:
         """Awareness layer — inject runtime metadata so agent knows its own capabilities."""
-        if not model_id:
-            return ""
-        parts: list[str] = [f"当前模型: {model_id}"]
+        from datetime import datetime
+
+        _WEEKDAYS = ("星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日")
+        now = datetime.now()
+        weekday = _WEEKDAYS[now.weekday()]
+        time_str = f"当前时间: {now.strftime('%Y-%m-%d %H:%M')} ({weekday})"
+
+        parts: list[str] = [time_str]
+        if model_id:
+            parts.append(f"当前模型: {model_id}")
         if max_context_tokens > 0:
             parts.append(f"上下文窗口: {max_context_tokens:,} tokens")
         return "【运行时信息】" + " | ".join(parts)

@@ -2267,6 +2267,7 @@ async def run_agent(
     round_idx = -1
     successful_tool_calls = 0
     _cron_reminder_notices: list[str] = []
+    _successful_tool_names: set[str] = set()
     browser_locked_by_evomap = evo_first_mode and not evomap_hint_hit
     while total_output < _MAX_OUTPUT_TOKENS:
         round_idx += 1
@@ -2753,6 +2754,7 @@ async def run_agent(
 
                 if result.success and result.output:
                     successful_tool_calls += 1
+                    _successful_tool_names.add(tc.name)
                     if tc.name in ("cron", "reminder") and "定时任务 +1" in result.output:
                         _cron_reminder_notices.append(result.output)
                     for path_match in re.finditer(
@@ -2770,6 +2772,7 @@ async def run_agent(
                             metadata_dirty = True
                 elif result.success:
                     successful_tool_calls += 1
+                    _successful_tool_names.add(tc.name)
                     if session is not None:
                         for office_path in _extract_office_paths(result.output):
                             if _remember_office_path(session.metadata, office_path):
@@ -2964,7 +2967,15 @@ async def run_agent(
     final_text = "".join(final_text_parts)
     final_text = _fix_image_paths(final_text, real_image_paths)
 
-    if _cron_reminder_notices:
+    _AUTOMATION_ONLY_TOOLS = {"cron", "reminder"}
+    if (
+        _cron_reminder_notices
+        and _successful_tool_names
+        and _successful_tool_names <= _AUTOMATION_ONLY_TOOLS
+    ):
+        # 仅有定时工具调用时，强制用工具输出替换 LLM 文本，防止 LLM 混淆上下文
+        final_text = "好的，" + _cron_reminder_notices[-1] + "。"
+    elif _cron_reminder_notices:
         _last_notice = _cron_reminder_notices[-1]
         _count_match = re.search(r"（定时任务 \+1，合计 (\d+)）", _last_notice)
         if _count_match and f"合计 {_count_match.group(1)}" not in final_text:

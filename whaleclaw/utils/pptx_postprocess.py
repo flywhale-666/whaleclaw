@@ -47,62 +47,7 @@ def fix_pptx(path: str | Path) -> bool:
     modified = False
 
     for slide in prs.slides:
-        sp_tree = slide.shapes._spTree  # type: ignore[attr-defined]
-        children = list(sp_tree)
-
-        image_indices: list[int] = []
-        large_rect_indices: list[int] = []
-
-        for idx, child in enumerate(children):
-            tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
-            is_picture = tag == "pic"
-            is_sp = tag == "sp"
-
-            if is_picture:
-                image_indices.append(idx)
-            elif is_sp:
-                xfrm = child.find(".//{http://schemas.openxmlformats.org/drawingml/2006/main}xfrm")
-                if xfrm is not None:
-                    off = xfrm.find("{http://schemas.openxmlformats.org/drawingml/2006/main}off")
-                    ext = xfrm.find("{http://schemas.openxmlformats.org/drawingml/2006/main}ext")
-                    if off is not None and ext is not None:
-                        cx = int(ext.get("cx", "0"))
-                        cy = int(ext.get("cy", "0"))
-                        area = cx * cy
-                        if area >= slide_area * _LARGE_SHAPE_AREA_RATIO:
-                            large_rect_indices.append(idx)
-
-        if image_indices and large_rect_indices:
-            min_img_idx = min(image_indices)
-            rects_above_images = [i for i in large_rect_indices if i > min_img_idx]
-
-            for rect_idx in sorted(rects_above_images, reverse=True):
-                element = children[rect_idx]
-                solid = element.find(
-                    ".//{http://schemas.openxmlformats.org/drawingml/2006/main}solidFill"
-                )
-                if solid is None:
-                    continue
-                alpha_elem = solid.find(
-                    "{http://schemas.openxmlformats.org/drawingml/2006/main}alpha"
-                )
-                if alpha_elem is not None:
-                    val = int(alpha_elem.get("val", "100000"))
-                    if val < 60000:
-                        continue
-
-                sp_tree.remove(element)
-                insert_pos = 0
-                for i, ch in enumerate(sp_tree):
-                    ch_tag = ch.tag.split("}")[-1] if "}" in ch.tag else ch.tag
-                    if ch_tag in ("cNvGrpSpPr", "grpSpPr", "nvGrpSpPr"):
-                        insert_pos = i + 1
-                    else:
-                        break
-                sp_tree.insert(insert_pos, element)
-                modified = True
-
-        if _fix_pictures_over_text(slide):
+        if _fix_zorder(slide, sw, sh, slide_area):
             modified = True
         _clamp_shapes(slide, sw, sh)
         if _fix_face_crops(slide):
@@ -164,6 +109,139 @@ def _has_text_content(element: object) -> bool:
         if t_elem.text and t_elem.text.strip():
             return True
     return False
+
+
+_FULLSCREEN_RATIO = 0.80
+
+
+def _get_element_area(child: object, ns: str = _A) -> int:
+    """Get area in EMU² from an sp/pic element, or 0."""
+    xfrm = child.find(f".//{{{ns}}}xfrm")  # type: ignore[union-attr]
+    if xfrm is None:
+        return 0
+    ext = xfrm.find(f"{{{ns}}}ext")
+    if ext is None:
+        return 0
+    return int(ext.get("cx", "0")) * int(ext.get("cy", "0"))
+
+
+def _has_alpha(element: object) -> bool:
+    """True if element has any transparency (alpha < 100% or transparency set)."""
+    alpha = element.find(f".//{{{_A}}}alpha")  # type: ignore[union-attr]
+    if alpha is not None:
+        val = int(alpha.get("val", "100000"))  # type: ignore[union-attr]
+        if val < 100000:
+            return True
+    for sf in element.findall(f".//{{{_A}}}solidFill"):  # type: ignore[union-attr]
+        a = sf.find(f"{{{_A}}}alpha")
+        if a is not None:
+            val = int(a.get("val", "100000"))
+            if val < 100000:
+                return True
+    return False
+
+
+def _sp_tree_content_start(sp_tree: object) -> int:
+    """Index of first content element (after group properties)."""
+    pos = 0
+    for i, ch in enumerate(sp_tree):  # type: ignore[arg-type]
+        ch_tag = ch.tag.split("}")[-1] if "}" in ch.tag else ch.tag
+        if ch_tag in ("cNvGrpSpPr", "grpSpPr", "nvGrpSpPr"):
+            pos = i + 1
+        else:
+            break
+    return pos
+
+
+def _fix_zorder(slide: object, sw: int, sh: int, slide_area: int) -> bool:
+    """Fix Z-order issues in a single slide.
+
+    Strategy:
+      1. Full-screen pictures (≥80% slide area) → move to bottom (background).
+      2. Semi-transparent overlays (large rect with alpha) → just above pictures.
+      3. Opaque shapes covering pictures → move shape below the picture.
+      4. Non-fullscreen pictures overlapping text → move below the text they cover.
+    """
+    sp_tree = slide.shapes._spTree  # type: ignore[attr-defined]
+    changed = False
+
+    fullscreen_pics: list[object] = []
+    overlay_rects: list[object] = []
+
+    for child in list(sp_tree):
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        area = _get_element_area(child)
+
+        if tag == "pic" and area >= slide_area * _FULLSCREEN_RATIO:
+            fullscreen_pics.append(child)
+        elif tag == "sp" and area >= slide_area * _LARGE_SHAPE_AREA_RATIO and _has_alpha(child):
+            overlay_rects.append(child)
+
+    base_pos = _sp_tree_content_start(sp_tree)
+
+    for pic_el in fullscreen_pics:
+        current = list(sp_tree).index(pic_el)
+        if current != base_pos:
+            sp_tree.remove(pic_el)
+            sp_tree.insert(base_pos, pic_el)
+            changed = True
+
+    if fullscreen_pics and overlay_rects:
+        for overlay_el in overlay_rects:
+            target_pos = base_pos + len(fullscreen_pics)
+            current = list(sp_tree).index(overlay_el)
+            if current != target_pos:
+                sp_tree.remove(overlay_el)
+                sp_tree.insert(target_pos, overlay_el)
+                changed = True
+
+    if _fix_opaque_shapes_over_pictures(sp_tree):
+        changed = True
+
+    if _fix_pictures_over_text(slide):
+        changed = True
+
+    return changed
+
+
+def _fix_opaque_shapes_over_pictures(sp_tree: object) -> bool:
+    """Move opaque (non-text) shapes below pictures they cover.
+
+    Handles the common case where a white card/rectangle is placed after
+    a picture in the script, ending up above it in Z-order and hiding it.
+    """
+    children = list(sp_tree)  # type: ignore[arg-type]
+    changed = False
+
+    pic_entries: list[tuple[int, object, tuple[int, int, int, int]]] = []
+    rect_entries: list[tuple[int, object, tuple[int, int, int, int]]] = []
+
+    for idx, child in enumerate(children):
+        tag = child.tag.split("}")[-1] if "}" in child.tag else child.tag
+        rect = _get_xfrm_rect(child)
+        if rect is None:
+            continue
+        if tag == "pic":
+            pic_entries.append((idx, child, rect))
+        elif tag == "sp" and not _has_text_content(child) and not _has_alpha(child):
+            rect_entries.append((idx, child, rect))
+
+    if not pic_entries or not rect_entries:
+        return False
+
+    for rect_idx, rect_el, rect_rect in rect_entries:
+        for pic_idx, pic_el, pic_rect in pic_entries:
+            if rect_idx <= pic_idx:
+                continue
+            frac = _overlap_fraction(rect_rect, pic_rect)
+            if frac >= _OVERLAP_THRESHOLD:
+                sp_tree.remove(rect_el)  # type: ignore[arg-type]
+                pic_pos = list(sp_tree).index(pic_el)  # type: ignore[arg-type]
+                sp_tree.insert(pic_pos, rect_el)  # type: ignore[arg-type]
+                changed = True
+                break
+
+    return changed
 
 
 def _fix_pictures_over_text(slide: object) -> bool:
@@ -242,13 +320,15 @@ def _clamp_shapes(slide: object, sw: int, sh: int) -> None:
 
 
 def _fix_textbox_overflow(shape: object, slide_width: int) -> None:
-    """Force word-wrap on text frames to prevent text overflow.
+    """Force word-wrap on text frames and shrink font if text overflows.
 
-    Also applies TEXT_TO_FIT_SHAPE auto-size so that if text still doesn't
-    fit after wrapping, the font shrinks rather than overflowing.
+    python-pptx's TEXT_TO_FIT_SHAPE only writes an XML flag that PowerPoint
+    interprets at render time. For environments that don't honour it (PDF
+    export, WPS, preview), we also do a rough server-side font shrink.
     """
     try:
         from pptx.enum.text import MSO_AUTO_SIZE  # type: ignore[import-untyped]
+        from pptx.util import Pt, Emu
     except ImportError:
         return
 
@@ -277,6 +357,85 @@ def _fix_textbox_overflow(shape: object, slide_width: int) -> None:
             shape.width = slide_width - shape.left  # type: ignore[attr-defined]
         except Exception:
             pass
+
+    _shrink_font_if_overflow(shape, tf)
+
+
+def _shrink_font_if_overflow(shape: object, tf: object) -> None:
+    """Estimate text height and shrink font if it exceeds the text box.
+
+    Uses a rough CJK-aware character-width model: each CJK character ≈ 1 em,
+    each ASCII character ≈ 0.55 em. Line height ≈ font_size × line_spacing.
+    """
+    try:
+        from pptx.util import Pt, Emu
+    except ImportError:
+        return
+
+    box_w = getattr(shape, "width", 0)
+    box_h = getattr(shape, "height", 0)
+    if box_w <= 0 or box_h <= 0:
+        return
+
+    margin_lr = getattr(tf, "margin_left", 0) or 0
+    margin_r = getattr(tf, "margin_right", 0) or 0
+    usable_w = box_w - margin_lr - margin_r
+    if usable_w <= 0:
+        return
+
+    paragraphs = getattr(tf, "paragraphs", None)
+    if not paragraphs:
+        return
+
+    max_font_size = 0
+    total_text = ""
+    for p in paragraphs:
+        p_text = getattr(p, "text", "")
+        total_text += p_text + "\n"
+        for run in getattr(p, "runs", []):
+            fs = getattr(run.font, "size", None)
+            if fs is not None and fs > max_font_size:
+                max_font_size = fs
+
+    if max_font_size <= 0 or not total_text.strip():
+        return
+
+    min_font_emu = int(Pt(11))
+
+    def _estimate_lines(font_emu: int) -> float:
+        """Estimate total lines needed at given font size."""
+        lines = 0.0
+        for p in paragraphs:
+            p_text = getattr(p, "text", "") or ""
+            if not p_text:
+                lines += 1.0
+                continue
+            char_w_sum = 0.0
+            for ch in p_text:
+                if ord(ch) > 0x2E7F:
+                    char_w_sum += font_emu
+                else:
+                    char_w_sum += font_emu * 0.55
+            p_lines = max(1.0, char_w_sum / usable_w)
+            lines += p_lines
+        return lines
+
+    line_spacing = 1.2
+    for _ in range(8):
+        est_lines = _estimate_lines(max_font_size)
+        est_height = est_lines * max_font_size * line_spacing
+        if est_height <= box_h:
+            break
+        max_font_size = int(max_font_size * 0.88)
+        if max_font_size < min_font_emu:
+            max_font_size = min_font_emu
+            break
+
+    for p in paragraphs:
+        for run in getattr(p, "runs", []):
+            fs = getattr(run.font, "size", None)
+            if fs is not None and fs > max_font_size:
+                run.font.size = max_font_size
 
 
 _IMG_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff"}

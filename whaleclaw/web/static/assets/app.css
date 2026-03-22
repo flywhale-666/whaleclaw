@@ -1421,6 +1421,222 @@ body {
 [data-theme="dark"] .btn-sm.btn-danger { border-color: #7f1d1d; }
 [data-theme="dark"] .btn-sm.btn-danger:hover { background: #450a0a; }
 
+/* ── Cron Jobs ── */
+.cron-layout {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 24px;
+  padding: 20px;
+  height: 100%;
+  overflow: auto;
+  align-items: start;
+}
+@media (max-width: 900px) {
+  .cron-layout { grid-template-columns: 1fr; }
+}
+.cron-panel-title {
+  font-size: 15px;
+  font-weight: 700;
+  margin: 0 0 16px;
+  color: var(--text-primary);
+}
+.cron-form-panel {
+  align-self: start;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 20px;
+}
+.cron-list-panel {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 20px;
+  overflow-y: auto;
+}
+.cron-list-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.cron-refresh-btn { font-size: 15px; }
+
+.form-group { margin-bottom: 14px; }
+.form-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  margin-bottom: 5px;
+  color: var(--text-secondary);
+}
+.form-required { color: #ef4444; margin-left: 2px; }
+.form-hint { display: block; color: var(--text-secondary); font-size: 12px; margin-top: 4px; }
+.form-input {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 14px;
+  box-sizing: border-box;
+  transition: border-color 0.15s;
+}
+.form-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(59,130,246,0.1);
+}
+.cron-textarea {
+  height: 60px;
+  resize: none;
+  font-family: inherit;
+}
+.form-row {
+  display: flex;
+  gap: 12px;
+}
+.form-row > div { flex: 1; }
+
+/* 时间选择行: 小时下拉 : 分钟输入 */
+.cron-time-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.cron-time-select { flex: 1; }
+.cron-time-sep {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  user-select: none;
+}
+.cron-time-minute {
+  flex: 0 0 72px;
+  text-align: center;
+}
+/* 隐藏 number 输入框的上下箭头（保留键盘箭头功能） */
+.cron-time-minute::-webkit-inner-spin-button,
+.cron-time-minute::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.cron-time-minute { -moz-appearance: textfield; }
+
+.cron-submit-btn {
+  margin-top: 18px;
+  width: auto;
+  padding: 8px 24px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 8px;
+}
+.cron-cancel-btn {
+  margin-top: 8px;
+  margin-left: 0;
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px 0;
+}
+.cron-cancel-btn:hover { color: var(--text-primary); }
+
+/* 任务卡片 */
+.cron-job-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.cron-job-card {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--bg-secondary);
+  transition: box-shadow 0.15s;
+}
+.cron-job-card:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.06);
+}
+[data-theme="dark"] .cron-job-card:hover {
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.cron-job-main { flex: 1; min-width: 0; }
+.cron-job-name {
+  font-weight: 700;
+  font-size: 14px;
+  margin-bottom: 3px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cron-job-schedule {
+  font-size: 12px;
+  font-weight: 500;
+  color: #16a34a;
+  margin-bottom: 3px;
+}
+[data-theme="dark"] .cron-job-schedule { color: #4ade80; }
+.cron-job-message {
+  font-size: 13px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 500px;
+  margin-bottom: 6px;
+}
+.cron-job-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.cron-badge {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+}
+.cron-badge-on { background: #dcfce7; color: #166534; }
+.cron-badge-off { background: #fee2e2; color: #991b1b; }
+.cron-badge-agent { background: #dbeafe; color: #1e40af; }
+[data-theme="dark"] .cron-badge-on { background: #14532d; color: #86efac; }
+[data-theme="dark"] .cron-badge-off { background: #450a0a; color: #fca5a5; }
+[data-theme="dark"] .cron-badge-agent { background: #1e3a5f; color: #93c5fd; }
+.cron-job-time {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+.cron-job-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex-shrink: 0;
+  margin-left: 12px;
+}
+.cron-action-btn {
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  cursor: pointer;
+  font-size: 14px;
+  transition: background 0.15s, border-color 0.15s;
+}
+.cron-action-edit:hover { border-color: var(--accent); background: #eff6ff; }
+.cron-action-delete:hover { border-color: #ef4444; background: #fef2f2; }
+[data-theme="dark"] .cron-action-edit:hover { background: #1e3a5f; }
+[data-theme="dark"] .cron-action-delete:hover { background: #450a0a; }
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
