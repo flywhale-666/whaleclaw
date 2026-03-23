@@ -349,53 +349,81 @@ def create_app(config: WhaleclawConfig) -> FastAPI:
         """去掉 '10分钟后' / '晚上10点半' 等时间前缀，只保留要执行的任务内容。"""
         return _DEFERRED_TIME_PREFIX_RE.sub("", text).strip() or text
 
+    async def _resolve_cron_session(
+        target: str,
+    ) -> tuple[str, Session | None, SessionManager | None]:
+        """将 cron action.target 解析为 (session_id, session, manager)。
+
+        当 target 不是有效 session（如 'user'）时，自动回退到最近活跃的会话。
+        """
+        mgr = state.get("manager")
+        session_manager = mgr if isinstance(mgr, SessionManager) else None
+        if session_manager is None:
+            return target, None, None
+
+        session = await session_manager.get(target)
+        if session is not None:
+            return target, session, session_manager
+
+        # target 无效（如 'user'），回退到最近活跃的会话
+        sessions = await session_manager.list_sessions()
+        if sessions:
+            latest = max(sessions, key=lambda s: s.updated_at)
+            session = await session_manager.get(latest.id)
+            if session is not None:
+                return session.id, session, session_manager
+
+        return target, None, session_manager
+
     async def _on_cron_fire(job_id: str, action: CronAction) -> None:
+        from whaleclaw.gateway.ws import broadcast_all
+
         if action.type == "message":
-            session_id = action.target
             text = action.payload.get("text", "")
-            if not (session_id and text):
+            if not text:
                 return
             content = f"⏰ **提醒**: {text}"
 
+            session_id, session, session_manager = await _resolve_cron_session(action.target)
+
             sent = await push_to_session(session_id, make_message(session_id, content))
-
             if not sent:
-                from whaleclaw.gateway.ws import broadcast_all
-
                 await broadcast_all(make_message(session_id, content))
 
-            if not sent and feishu_channel is not None:
-                mgr = state.get("manager")
-                if isinstance(mgr, SessionManager):
-                    s = await mgr.get(session_id)
-                    if s and s.channel == "feishu" and feishu_channel.client:
-                        await feishu_channel.client.send_message(
-                            s.peer_id,
-                            "text",
-                            json.dumps({"text": content}, ensure_ascii=False),
-                        )
+            # 飞书 fallback：优先用关联 session 的 peer_id，否则广播到飞书
+            if not sent and feishu_channel is not None and feishu_channel.client:
+                if session and session.channel == "feishu":
+                    await feishu_channel.client.send_message(
+                        session.peer_id,
+                        "text",
+                        json.dumps({"text": content}, ensure_ascii=False),
+                    )
+                else:
+                    # 没有关联飞书会话时，尝试找任意飞书会话发送
+                    if session_manager is not None:
+                        all_sessions = await session_manager.list_sessions()
+                        for s in sorted(all_sessions, key=lambda x: x.updated_at, reverse=True):
+                            if s.channel == "feishu" and s.peer_id:
+                                await feishu_channel.client.send_message(
+                                    s.peer_id,
+                                    "text",
+                                    json.dumps({"text": content}, ensure_ascii=False),
+                                )
+                                break
 
-            mgr = state.get("manager")
-            if isinstance(mgr, SessionManager):
-                s = await mgr.get(session_id)
-                if s:
-                    await mgr.add_message(s, "assistant", content)
+            if session_manager is not None and session is not None:
+                await session_manager.add_message(session, "assistant", content)
 
         elif action.type == "agent":
-            session_id = action.target
             text = str(action.payload.get("text", ""))
-            if not (session_id and text):
+            if not text:
                 return
 
             from whaleclaw.agent.single_agent import run_agent
-            from whaleclaw.gateway.ws import broadcast_all
 
-            mgr = state.get("manager")
-            session_manager = mgr if isinstance(mgr, SessionManager) else None
-            session: Session | None = None
-            if session_manager is not None:
-                session = await session_manager.get(session_id)
+            session_id, session, session_manager = await _resolve_cron_session(action.target)
             if session is None:
+                log.warning("cron_fire_no_session", job_id=job_id, target=action.target)
                 return
 
             notice = f"⏰ 定时任务触发：{text}"
@@ -1342,13 +1370,15 @@ def create_app(config: WhaleclawConfig) -> FastAPI:
         if action_type not in ("message", "agent"):
             action_type = "message"
 
+        target_session = str(body.get("session_id", "")).strip() or "user"
+
         job = _CJ(
             id=f"cron-{uuid4().hex[:12]}",
             name=name or f"任务: {message[:20]}",
             schedule_obj=sched,
             action=_CA(
                 type=action_type,  # pyright: ignore[reportArgumentType]
-                target="user",
+                target=target_session,
                 payload={"text": message},
             ),
             enabled=enabled,
@@ -1413,12 +1443,14 @@ def create_app(config: WhaleclawConfig) -> FastAPI:
         if action_type not in ("message", "agent"):
             action_type = existing.action.type
 
+        target_session = str(body.get("session_id", "")).strip() or existing.action.target
+
         updated = existing.model_copy(update={
             "name": name,
             "schedule_obj": sched,
             "action": _CA(
                 type=action_type,  # pyright: ignore[reportArgumentType]
-                target=existing.action.target,
+                target=target_session,
                 payload={"text": message},
             ),
             "enabled": enabled,

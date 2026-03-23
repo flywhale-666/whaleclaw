@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any, Literal
 
 import structlog
@@ -100,7 +100,7 @@ def _matches_cron_expr(expr: str, now: datetime) -> bool:
         and _parse_cron_field(parts[1], 0, 23, now.hour)
         and _parse_cron_field(parts[2], 1, 31, now.day)
         and _parse_cron_field(parts[3], 1, 12, now.month)
-        and _parse_cron_field(parts[4], 0, 6, now.weekday())
+        and _parse_cron_field(parts[4], 0, 6, (now.weekday() + 1) % 7)
     )
 
 
@@ -176,6 +176,12 @@ class CronScheduler:
         job = job.model_copy(update={"last_run": datetime.now()})
         self._jobs[job_id] = job
 
+        if self._on_persist_save is not None:
+            try:
+                await self._on_persist_save(job)
+            except Exception as exc:
+                logger.error("cron_persist_save_failed", job_id=job_id, error=str(exc))
+
         if self._on_fire:
             try:
                 await self._on_fire(job_id, job.action)
@@ -192,10 +198,19 @@ class CronScheduler:
 
         sched = job.schedule_obj
         if sched is None:
-            return _matches_cron_expr(job.schedule, now)
+            if not _matches_cron_expr(job.schedule, now):
+                return False
+            # 同一分钟内只触发一次
+            if job.last_run is not None:
+                return now.replace(second=0, microsecond=0) > job.last_run.replace(second=0, microsecond=0)
+            return True
 
         if sched.kind == "cron":
-            return _matches_cron_expr(sched.expr or job.schedule, now)
+            if not _matches_cron_expr(sched.expr or job.schedule, now):
+                return False
+            if job.last_run is not None:
+                return now.replace(second=0, microsecond=0) > job.last_run.replace(second=0, microsecond=0)
+            return True
 
         if sched.kind == "at":
             if sched.at is None:
@@ -205,9 +220,8 @@ class CronScheduler:
         if sched.kind == "every":
             if sched.every_seconds <= 0:
                 return False
-            if job.last_run is None:
-                return True
-            elapsed = (now - job.last_run).total_seconds()
+            baseline = job.last_run or job.created_at
+            elapsed = (now - baseline).total_seconds()
             return elapsed >= sched.every_seconds
 
         return False
@@ -218,9 +232,12 @@ class CronScheduler:
             if not self._running:
                 break
             now = datetime.now()
-            for job in list(self._jobs.values()):
-                if self._should_run(job, now):
-                    await self.trigger_job(job.id)
+            pending = [job.id for job in self._jobs.values() if self._should_run(job, now)]
+            for job_id in pending:
+                asyncio.create_task(
+                    self.trigger_job(job_id),
+                    name=f"cron-fire-{job_id}",
+                )
 
     async def start(self) -> None:
         self._running = True

@@ -46,6 +46,16 @@ class CronStore:
             )
             """
         )
+        # 旧表可能缺少新增字段，逐个补上
+        migrations: list[str] = [
+            "ALTER TABLE cron_jobs ADD COLUMN schedule_obj_json TEXT",
+            "ALTER TABLE cron_jobs ADD COLUMN one_shot INTEGER NOT NULL DEFAULT 0",
+        ]
+        for stmt in migrations:
+            try:
+                await self._conn.execute(stmt)
+            except Exception:
+                pass
         await self._conn.commit()
 
     def _job_to_row(self, job: CronJob) -> tuple[object, ...]:
@@ -53,8 +63,8 @@ class CronStore:
             job.id,
             job.name,
             job.schedule,
-            json.dumps(job.schedule_obj.model_dump()) if job.schedule_obj else None,
-            json.dumps(job.action.model_dump()),
+            json.dumps(job.schedule_obj.model_dump(mode="json")) if job.schedule_obj else None,
+            json.dumps(job.action.model_dump(mode="json")),
             1 if job.enabled else 0,
             1 if job.one_shot else 0,
             job.created_at.isoformat(),
@@ -110,7 +120,10 @@ class CronStore:
     async def load_jobs(self) -> list[CronJob]:
         if not self._conn:
             return []
-        cursor = await self._conn.execute("SELECT * FROM cron_jobs")
+        cursor = await self._conn.execute(
+            "SELECT id, name, schedule, schedule_obj_json, action_json,"
+            " enabled, one_shot, created_at, last_run, next_run FROM cron_jobs"
+        )
         rows = await cursor.fetchall()
         return [self._row_to_job(r) for r in rows]
 

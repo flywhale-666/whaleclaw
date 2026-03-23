@@ -637,6 +637,7 @@ createApp({
         message: cronForm.message,
         action_type: cronForm.actionType,
         enabled: cronForm.enabled,
+        session_id: activeSessionId.value || '',
       };
       if (t === 'daily') {
         return { ...base, schedule_kind: 'cron', cron_expr: `${cronForm.minute} ${cronForm.hour} * * *`, one_shot: false };
@@ -759,8 +760,12 @@ createApp({
       cronForm.scheduleType = 'daily';
     }
 
+    function minuteDisplay() {
+      return String(cronForm.minute).padStart(2, '0');
+    }
     function handleMinuteInput(e) {
-      let v = parseInt(e.target.value, 10);
+      const raw = e.target.value.replace(/\D/g, '');
+      let v = parseInt(raw, 10);
       if (isNaN(v) || v < 0) v = 0;
       if (v > 59) v = 59;
       cronForm.minute = v;
@@ -769,16 +774,37 @@ createApp({
       if (e.key === 'ArrowUp') {
         e.preventDefault();
         cronForm.minute = cronForm.minute >= 59 ? 0 : cronForm.minute + 1;
+        e.target.value = minuteDisplay();
       } else if (e.key === 'ArrowDown') {
         e.preventDefault();
         cronForm.minute = cronForm.minute <= 0 ? 59 : cronForm.minute - 1;
+        e.target.value = minuteDisplay();
       }
     }
-    function handleMinuteBlur() {
+    function handleMinuteBlur(e) {
       let v = cronForm.minute;
       if (isNaN(v) || v < 0) v = 0;
       if (v > 59) v = 59;
       cronForm.minute = v;
+      e.target.value = minuteDisplay();
+    }
+    function minuteUp() {
+      cronForm.minute = cronForm.minute >= 59 ? 0 : cronForm.minute + 1;
+    }
+    function minuteDown() {
+      cronForm.minute = cronForm.minute <= 0 ? 59 : cronForm.minute - 1;
+    }
+    function intervalUp() {
+      cronForm.intervalValue = (cronForm.intervalValue || 1) + 1;
+    }
+    function intervalDown() {
+      cronForm.intervalValue = Math.max(1, (cronForm.intervalValue || 1) - 1);
+    }
+    function delayUp() {
+      cronForm.delayValue = (cronForm.delayValue || 1) + 1;
+    }
+    function delayDown() {
+      cronForm.delayValue = Math.max(1, (cronForm.delayValue || 1) - 1);
     }
 
     async function loadCronJobs() {
@@ -2284,7 +2310,8 @@ createApp({
       mcpServers, mcpLoading, mcporterAvailable, loadMcpServers, removeMcpServer,
       cronJobs, cronLoading, cronSaving, cronEditingId, cronForm,
       loadCronJobs, saveCronJob, deleteCronJob, editCronJob, cancelCronEdit,
-      handleMinuteInput, handleMinuteKeydown, handleMinuteBlur,
+      minuteDisplay, handleMinuteInput, handleMinuteKeydown, handleMinuteBlur,
+      minuteUp, minuteDown, intervalUp, intervalDown, delayUp, delayDown,
       describeCronJob, weekdayLabels, formatCronTime,
       loadSkills, loadTools,
     };
@@ -2759,8 +2786,14 @@ createApp({
                         <option v-for="h in 24" :key="h-1" :value="h-1">{{ String(h-1).padStart(2,'0') }} 时</option>
                       </select>
                       <span class="cron-time-sep">:</span>
-                      <input type="number" :value="String(cronForm.minute).padStart(2,'0')" min="0" max="59" placeholder="00"
-                        @input="handleMinuteInput" @keydown="handleMinuteKeydown" @blur="handleMinuteBlur" class="form-input cron-time-minute" />
+                      <div class="cron-time-minute-wrap">
+                        <input type="text" :value="minuteDisplay()" maxlength="2" placeholder="00"
+                          @input="handleMinuteInput" @keydown="handleMinuteKeydown" @blur="handleMinuteBlur" />
+                        <div class="cron-minute-btns">
+                          <button type="button" class="cron-minute-btn" @click="minuteUp">▲</button>
+                          <button type="button" class="cron-minute-btn" @click="minuteDown">▼</button>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </template>
@@ -2780,8 +2813,14 @@ createApp({
                         <option v-for="h in 24" :key="h-1" :value="h-1">{{ String(h-1).padStart(2,'0') }} 时</option>
                       </select>
                       <span class="cron-time-sep">:</span>
-                      <input type="number" :value="String(cronForm.minute).padStart(2,'0')" min="0" max="59" placeholder="00"
-                        @input="handleMinuteInput" @keydown="handleMinuteKeydown" @blur="handleMinuteBlur" class="form-input cron-time-minute" />
+                      <div class="cron-time-minute-wrap">
+                        <input type="text" :value="minuteDisplay()" maxlength="2" placeholder="00"
+                          @input="handleMinuteInput" @keydown="handleMinuteKeydown" @blur="handleMinuteBlur" />
+                        <div class="cron-minute-btns">
+                          <button type="button" class="cron-minute-btn" @click="minuteUp">▲</button>
+                          <button type="button" class="cron-minute-btn" @click="minuteDown">▼</button>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </template>
@@ -2791,7 +2830,13 @@ createApp({
                   <div class="form-group form-row">
                     <div>
                       <label class="form-label">间隔</label>
-                      <input type="number" v-model.number="cronForm.intervalValue" min="1" class="form-input" />
+                      <div class="cron-time-minute-wrap">
+                        <input type="number" v-model.number="cronForm.intervalValue" min="1" />
+                        <div class="cron-minute-btns">
+                          <button type="button" class="cron-minute-btn" @click="intervalUp">▲</button>
+                          <button type="button" class="cron-minute-btn" @click="intervalDown">▼</button>
+                        </div>
+                      </div>
                     </div>
                     <div>
                       <label class="form-label">单位</label>
@@ -2822,7 +2867,13 @@ createApp({
                   <div class="form-group form-row">
                     <div>
                       <label class="form-label">延迟</label>
-                      <input type="number" v-model.number="cronForm.delayValue" min="1" class="form-input" />
+                      <div class="cron-time-minute-wrap">
+                        <input type="number" v-model.number="cronForm.delayValue" min="1" />
+                        <div class="cron-minute-btns">
+                          <button type="button" class="cron-minute-btn" @click="delayUp">▲</button>
+                          <button type="button" class="cron-minute-btn" @click="delayDown">▼</button>
+                        </div>
+                      </div>
                     </div>
                     <div>
                       <label class="form-label">单位</label>
@@ -2839,11 +2890,11 @@ createApp({
                   <div class="form-group">
                     <label class="form-label">Cron 表达式</label>
                     <input type="text" v-model="cronForm.cronExpr" placeholder="0 9 * * *" class="form-input" />
-                    <small class="form-hint">格式: 分 时 日 月 星期</small>
+                    <small class="form-hint">格式: 分 时 日 月 星期 &nbsp;｜&nbsp; 例: <code>0 9 * * *</code> 每天9点 &nbsp; <code>*/30 * * * *</code> 每30分钟 &nbsp; <code>0 8 * * 1</code> 每周一8点</small>
                   </div>
                 </template>
 
-                <button class="btn btn-primary cron-submit-btn" @click="saveCronJob" :disabled="cronSaving">
+                <button class="cron-submit-btn" @click="saveCronJob" :disabled="cronSaving">
                   {{ cronSaving ? '保存中…' : (cronEditingId ? '更新任务' : '创建任务') }}
                 </button>
                 <button v-if="cronEditingId" class="btn cron-cancel-btn" @click="cancelCronEdit">取消编辑</button>
