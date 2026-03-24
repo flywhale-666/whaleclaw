@@ -24,6 +24,7 @@ from whaleclaw.agent.single_agent import (
 )
 from whaleclaw.config.paths import WHALECLAW_HOME
 from whaleclaw.config.schema import WhaleclawConfig
+from whaleclaw.gateway.middleware import verify_jwt
 from whaleclaw.gateway.protocol import (
     MessageType,
     WSMessage,
@@ -179,6 +180,18 @@ async def websocket_handler(
     compression_ready_fn: Callable[[], bool] | None = None,
 ) -> None:
     """Handle a single WebSocket connection lifecycle."""
+    auth_cfg = config.gateway.auth
+    if auth_cfg.mode == "token":
+        ws_token = websocket.query_params.get("token", "")
+        if ws_token != auth_cfg.token:
+            await websocket.close(code=4401, reason="认证失败")
+            return
+    elif auth_cfg.mode == "password":
+        ws_token = websocket.query_params.get("token", "")
+        if not verify_jwt(auth_cfg, ws_token):
+            await websocket.close(code=4401, reason="认证失败")
+            return
+
     await websocket.accept()
 
     conn_key = f"_conn:{uuid4().hex[:12]}"

@@ -42,7 +42,10 @@ async def handle_file_message(
 
     data = await client.download_resource(msg_id, file_key)
     _MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    dest = _MEDIA_DIR / file_name
+    safe_name = Path(file_name).name
+    dest = _MEDIA_DIR / safe_name
+    if not dest.resolve().is_relative_to(_MEDIA_DIR.resolve()):
+        return ""
     dest.write_bytes(data)
     return str(dest)
 

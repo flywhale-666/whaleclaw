@@ -2,19 +2,32 @@
 
 from typing import ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from whaleclaw.config.paths import WORKSPACE_DIR
+
+
+def _generate_secret(length: int = 32) -> str:
+    """生成密码学安全的随机十六进制字符串。"""
+    import secrets
+    return secrets.token_hex(length)
 
 
 class AuthConfig(BaseModel):
     """Authentication configuration for the Gateway."""
 
-    mode: str = "none"
+    mode: str = "token"
     password: str | None = None
     token: str | None = None
-    jwt_secret: str = "whaleclaw-default-secret"
+    jwt_secret: str = Field(default_factory=lambda: _generate_secret(32))
     jwt_expire_hours: int = 24
+
+    @model_validator(mode="after")
+    def _ensure_token(self) -> "AuthConfig":
+        """Token 模式下自动生成随机 token（首次启动时）。"""
+        if self.mode == "token" and not self.token:
+            self.token = _generate_secret(24)
+        return self
 
 
 class GatewayConfig(BaseModel):

@@ -107,8 +107,20 @@ __all__ = [
 # ── 函数 ──────────────────────────────────────────────────────
 
 
-def fix_image_paths(text: str, known_paths: list[str] | None = None) -> str:
-    """Validate image paths in markdown; fix fabricated paths using known real ones."""
+def fix_image_paths(
+    text: str,
+    known_paths: list[str] | None = None,
+    *,
+    fallback_disk: bool = True,
+) -> str:
+    """Validate image paths in markdown; fix fabricated paths using known real ones.
+
+    Args:
+        text: agent 回复文本
+        known_paths: 本轮工具成功产出的真实图片路径
+        fallback_disk: 本轮有图片产出时传 True，允许 hash 模糊匹配和按最近修改时间
+                       在磁盘上查找；无产出时传 False，避免把不相关的旧图替换进来。
+    """
     from pathlib import Path
 
     unused_real = list(known_paths or [])
@@ -125,6 +137,10 @@ def fix_image_paths(text: str, known_paths: list[str] | None = None) -> str:
                 unused_real.pop(i)
                 log.info("fix_image_path.known", original=raw_path, found=real)
                 return f"![{alt}]({real})"
+
+        if not fallback_disk:
+            log.warning("fix_image_path.removed", path=raw_path)
+            return ""
 
         stem = fp.stem
         hash_m = re.search(r"_([0-9a-f]{6,8})$", stem)
@@ -147,7 +163,7 @@ def fix_image_paths(text: str, known_paths: list[str] | None = None) -> str:
                 return f"![{alt}]({best})"
 
         log.warning("fix_image_path.removed", path=raw_path)
-        return f"[图片未找到: {alt}]"
+        return ""
 
     return IMG_MD_RE.sub(_replace, text)
 

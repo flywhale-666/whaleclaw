@@ -659,6 +659,15 @@ def apply_tool_result_guards(
     if result.success and is_progress_stage_tool_call(tc):
         state.search_query_repeat_streak = 0
         state.last_search_query = ""
+        # 写操作成功说明 LLM 做了实质修改，重置 bash/browser 失败计数使其重新可用
+        # bash 自身成功时已在 _apply_failure_guard 中重置，此处排除避免重复
+        if tc.name != "bash":
+            state.bash_fail_streak = 0
+            state.same_failed_bash_streak = 0
+            state.last_failed_bash_signature = ""
+            state.browser_fail_streak = 0
+            state.blocked_tools.discard("bash")
+            state.blocked_tools.discard("browser")
 
     return failure_update
 

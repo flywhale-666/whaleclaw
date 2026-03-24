@@ -27,6 +27,7 @@ from whaleclaw.utils.log import get_logger
 
 _IMG_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
 _FILE_RE = re.compile(r"(?<!!)\[([^\]]+)\]\((/[^)]+)\)")
+_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 _SUBMIT_RE = re.compile(r"(?:^|[\s，。,\.!！?？])提交\s*$", re.IGNORECASE)
 _FILE_EXTS = {
     ".txt",
@@ -931,17 +932,13 @@ class FeishuBot:
     def _prepare_reply_payload(self, reply: str) -> tuple[str, list[Path], list[Path]]:
         """Extract text/image/file payloads from agent reply."""
         image_paths: list[Path] = []
+        seen_image_paths: set[str] = set()
         for match in _IMG_RE.finditer(reply):
             path = match.group(2)
             local = Path(path)
-            if local.is_file() and local.suffix.lower() in {
-                ".png",
-                ".jpg",
-                ".jpeg",
-                ".gif",
-                ".webp",
-            }:
+            if local.is_file() and local.suffix.lower() in _IMAGE_EXTS:
                 image_paths.append(local)
+                seen_image_paths.add(path)
 
         file_paths: list[Path] = []
         file_replacements: list[tuple[str, str]] = []
@@ -950,7 +947,14 @@ class FeishuBot:
         for match in _FILE_RE.finditer(reply):
             name, path = match.group(1), match.group(2)
             local = Path(path)
-            if local.is_file() and local.suffix.lower() in _FILE_EXTS and path not in seen_paths:
+            if not local.is_file() or path in seen_paths:
+                continue
+            ext = local.suffix.lower()
+            if ext in _IMAGE_EXTS and path not in seen_image_paths:
+                seen_image_paths.add(path)
+                image_paths.append(local)
+                file_replacements.append((match.group(0), ""))
+            elif ext in _FILE_EXTS:
                 seen_paths.add(path)
                 file_paths.append(local)
                 file_replacements.append((match.group(0), f"📎 {name}"))

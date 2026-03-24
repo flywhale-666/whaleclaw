@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac as _hmac
 import json
 from base64 import b64decode
 from typing import Any
@@ -27,7 +28,7 @@ def verify_signature(
     """Verify Feishu Webhook signature (SHA-256)."""
     content = f"{timestamp}{nonce}{encrypt_key}".encode() + body
     expected = hashlib.sha256(content).hexdigest()
-    return expected == signature
+    return _hmac.compare_digest(expected, signature)
 
 
 def decrypt_event(encrypt_key: str, encrypted: str) -> dict[str, Any]:
@@ -57,12 +58,6 @@ def create_feishu_router(
         raw_body = await request.body()
         body: dict[str, Any] = json.loads(raw_body)
 
-        if config.encrypt_key and "encrypt" in body:
-            body = decrypt_event(config.encrypt_key, body["encrypt"])
-
-        if "challenge" in body:
-            return JSONResponse({"challenge": body["challenge"]})
-
         if config.encrypt_key:
             headers = request.headers
             sig = headers.get("x-lark-signature", "")
@@ -71,6 +66,12 @@ def create_feishu_router(
             if not verify_signature(ts, nonce, config.encrypt_key, raw_body, sig):
                 log.warning("feishu.invalid_signature")
                 return JSONResponse({"error": "invalid signature"}, status_code=403)
+
+        if config.encrypt_key and "encrypt" in body:
+            body = decrypt_event(config.encrypt_key, body["encrypt"])
+
+        if "challenge" in body:
+            return JSONResponse({"challenge": body["challenge"]})
 
         event_type = (
             body.get("header", {}).get("event_type", "")

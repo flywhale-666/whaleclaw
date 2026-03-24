@@ -61,6 +61,43 @@ def _env_overrides() -> dict[str, object]:
     return result
 
 
+def _persist_auto_generated_auth(cfg: WhaleclawConfig, user_cfg_path: Path) -> None:
+    """首次自动生成的 token / jwt_secret 持久化到用户配置文件，避免每次重启变化。"""
+    auth = cfg.gateway.auth
+    if auth.mode != "token" or not auth.token:
+        return
+
+    existing = _load_json(user_cfg_path) if user_cfg_path.is_file() else {}
+    gw = existing.get("gateway")
+    if not isinstance(gw, dict):
+        gw = {}
+        existing["gateway"] = gw
+    gw_dict = cast(dict[str, object], gw)
+    auth_dict_raw = gw_dict.get("auth")
+    if not isinstance(auth_dict_raw, dict):
+        auth_dict_raw = {}
+        gw_dict["auth"] = auth_dict_raw
+    auth_dict = cast(dict[str, object], auth_dict_raw)
+
+    changed = False
+    if not auth_dict.get("token"):
+        auth_dict["token"] = auth.token
+        changed = True
+    if not auth_dict.get("jwt_secret"):
+        auth_dict["jwt_secret"] = auth.jwt_secret
+        changed = True
+    if "mode" not in auth_dict:
+        auth_dict["mode"] = auth.mode
+        changed = True
+
+    if changed:
+        user_cfg_path.parent.mkdir(parents=True, exist_ok=True)
+        user_cfg_path.write_text(
+            json.dumps(existing, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+
 def load_config(
     *,
     config_path: Path | None = None,
@@ -92,6 +129,8 @@ def load_config(
         cfg = WhaleclawConfig.model_validate(merged)
     except Exception as exc:
         raise ConfigError(f"配置校验失败: {exc}") from exc
+
+    _persist_auto_generated_auth(cfg, config_path or CONFIG_FILE)
 
     global _config  # noqa: PLW0603
     _config = cfg

@@ -229,6 +229,7 @@ from whaleclaw.agent.helpers.tool_execution import (
     can_auto_create_parent_for_failure,
     create_default_registry,
 )
+from whaleclaw.security.permissions import SecurityPolicy
 from whaleclaw.agent.helpers.tool_execution import (
     execute_tool as _execute_tool,
 )
@@ -945,6 +946,8 @@ async def run_agent(
         router = ModelRouter(models_cfg)
     if registry is None:
         registry = create_default_registry()
+
+    _security_policy = SecurityPolicy()
 
     if not multi_agent_internal:
         ma_cfg = _resolve_multi_agent_cfg(config, session)
@@ -2550,6 +2553,7 @@ async def run_agent(
                 office_edit_path="",
                 on_tool_call=on_tool_call,
                 on_tool_result=on_tool_result,
+                security_policy=_security_policy,
             )
             if not _pf_result.success:
                 log.info(
@@ -2669,6 +2673,7 @@ async def run_agent(
                             office_edit_path=office_edit_path,
                             on_tool_call=on_tool_call,
                             on_tool_result=on_tool_result,
+                            security_policy=_security_policy,
                         )
                         for batch_tc in batch
                     ]
@@ -2692,6 +2697,7 @@ async def run_agent(
                     office_edit_path=office_edit_path,
                     on_tool_call=on_tool_call,
                     on_tool_result=on_tool_result,
+                    security_policy=_security_policy,
                 )
                 executed_calls = [(tc, tc_id, result)]
             for tc, tc_id, result in executed_calls:
@@ -2965,7 +2971,9 @@ async def run_agent(
         )
 
     final_text = "".join(final_text_parts)
-    final_text = _fix_image_paths(final_text, real_image_paths)
+    final_text = _fix_image_paths(
+        final_text, real_image_paths, fallback_disk=bool(real_image_paths)
+    )
 
     _AUTOMATION_ONLY_TOOLS = {"cron", "reminder"}
     if (

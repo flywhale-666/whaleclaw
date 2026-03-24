@@ -15,6 +15,7 @@ from whaleclaw.agent.helpers.office_rules import (
     looks_like_ppt_generation_script,
 )
 from whaleclaw.providers.base import ToolCall
+from whaleclaw.security.permissions import PermissionChecker, SecurityPolicy
 from whaleclaw.sessions.manager import Session, SessionManager
 from whaleclaw.tools.base import ToolResult
 from whaleclaw.tools.registry import ToolRegistry
@@ -207,11 +208,61 @@ async def execute_tool(
     office_edit_path: str,
     on_tool_call: OnToolCall | None,
     on_tool_result: OnToolResult | None,
+    security_policy: SecurityPolicy | None = None,
 ) -> tuple[str, ToolResult]:
     if on_tool_call:
         await on_tool_call(tc.name, tc.arguments)
 
     t0 = time.monotonic()
+
+    # -- SecurityPolicy 检查（工具白名单 / 路径 / 命令） --
+    if security_policy is not None:
+        if not PermissionChecker.check_tool(tc.name, security_policy):
+            result = ToolResult(
+                success=False, output="",
+                error=f"安全策略禁止使用工具: {tc.name}",
+            )
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
+            log.warning("agent.tool_denied_by_policy", tool=tc.name, elapsed_ms=elapsed_ms)
+            if on_tool_result:
+                await on_tool_result(tc.name, result)
+            return tc.id, result
+
+        if tc.name == "bash":
+            cmd = str(tc.arguments.get("command", ""))
+            if not PermissionChecker.check_command(cmd, security_policy):
+                result = ToolResult(
+                    success=False, output="",
+                    error=f"安全策略拦截危险命令: {cmd[:120]}",
+                )
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                log.warning("agent.cmd_denied_by_policy", command=cmd[:200], elapsed_ms=elapsed_ms)
+                if on_tool_result:
+                    await on_tool_result(tc.name, result)
+                return tc.id, result
+            if security_policy.safe_delete:
+                cmd = PermissionChecker.apply_safe_delete(cmd, security_policy)
+                if cmd != str(tc.arguments.get("command", "")):
+                    tc = ToolCall(
+                        id=tc.id, name=tc.name,
+                        arguments={**tc.arguments, "command": cmd},
+                    )
+
+        if tc.name in ("file_read", "file_write", "file_edit"):
+            path_arg = str(tc.arguments.get("path", ""))
+            is_write = tc.name in ("file_write", "file_edit")
+            if path_arg and not PermissionChecker.check_path(
+                path_arg, security_policy, write=is_write,
+            ):
+                result = ToolResult(
+                    success=False, output="",
+                    error=f"安全策略禁止访问路径: {path_arg}",
+                )
+                elapsed_ms = int((time.monotonic() - t0) * 1000)
+                log.warning("agent.path_denied_by_policy", path=path_arg, elapsed_ms=elapsed_ms)
+                if on_tool_result:
+                    await on_tool_result(tc.name, result)
+                return tc.id, result
 
     if tc.name == "bash" and _is_crontab_command(str(tc.arguments.get("command", ""))):
         result = ToolResult(
